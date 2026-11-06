@@ -1,86 +1,46 @@
-"""
-JWT token utilities and password hashing.
-"""
-
-from __future__ import annotations
-
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
 
-from app.core.config import settings
+from app.core.config import get_settings
 
-# ── Password hashing ────────────────────────────────────────────────────────
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+password_hasher = PasswordHash.recommended()
 
 
-def hash_password(plain: str) -> str:
-    """Return a bcrypt hash of *plain*."""
-    return pwd_context.hash(plain)
+def hash_password(password: str) -> str:
+    return password_hasher.hash(password)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    """Return ``True`` when *plain* matches *hashed*."""
-    return pwd_context.verify(plain, hashed)
+def verify_password(password: str, password_hash: str) -> bool:
+    return password_hasher.verify(password, password_hash)
 
 
-# ── JWT tokens ───────────────────────────────────────────────────────────────
-
-def create_access_token(
-    subject: UUID | str,
-    extra_claims: Optional[Dict[str, Any]] = None,
-    expires_delta: Optional[timedelta] = None,
-) -> str:
-    """Create a signed JWT access token."""
+def create_access_token(user_id: UUID) -> str:
+    settings = get_settings()
     now = datetime.now(timezone.utc)
-    expire = now + (expires_delta or timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload: Dict[str, Any] = {
-        "sub": str(subject),
-        "iat": now,
-        "exp": expire,
-        "type": "access",
-    }
-    if extra_claims:
-        payload.update(extra_claims)
-    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    expires_at = now + timedelta(minutes=settings.access_token_expire_minutes)
+    return jwt.encode(
+        {
+            "sub": str(user_id),
+            "iat": now,
+            "exp": expires_at,
+            "jti": str(uuid4()),
+        },
+        settings.jwt_secret_key.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
 
 
-def create_refresh_token(
-    subject: UUID | str,
-    expires_delta: Optional[timedelta] = None,
-) -> str:
-    """Create a signed JWT refresh token."""
-    now = datetime.now(timezone.utc)
-    expire = now + (expires_delta or timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS))
-    payload: Dict[str, Any] = {
-        "sub": str(subject),
-        "iat": now,
-        "exp": expire,
-        "type": "refresh",
-    }
-    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+def decode_access_token(token: str) -> UUID:
+    settings = get_settings()
+    payload = jwt.decode(
+        token,
+        settings.jwt_secret_key.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
+    )
+    return UUID(payload["sub"])
 
 
-def decode_token(token: str) -> Dict[str, Any]:
-    """Decode and verify a JWT token. Raises ``JWTError`` on failure."""
-    return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-
-
-def decode_access_token(token: str) -> Dict[str, Any]:
-    """Decode an access token and verify its type claim."""
-    payload = decode_token(token)
-    if payload.get("type") != "access":
-        raise JWTError("Token is not an access token")
-    return payload
-
-
-def decode_refresh_token(token: str) -> Dict[str, Any]:
-    """Decode a refresh token and verify its type claim."""
-    payload = decode_token(token)
-    if payload.get("type") != "refresh":
-        raise JWTError("Token is not a refresh token")
-    return payload
+__all__ = ["JWTError", "create_access_token", "decode_access_token", "hash_password", "verify_password"]

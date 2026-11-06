@@ -1,83 +1,46 @@
-# JohnnySummUP V1 — Medical Document Intelligence
+# JohnnySummUP
 
-> **Your brave summarizer** 🔍
+Phase 1 establishes the public landing page, account registration and login, a protected dashboard shell, domain placeholders, and profile/logout settings. Document uploads, document processing, AI workflows, and domain data are intentionally out of scope.
 
-JohnnySummUP is a medical-first AI document intelligence platform that helps users understand medical documents by extracting structured information, generating plain-language summaries, identifying values outside reference intervals, and keeping uploaded documents in a searchable personal record.
+## Requirements
 
-## Architecture
+- Python 3.11+
+- Node.js 20+
+- PostgreSQL 14+
 
-```
-JohnnySummUp/
-├── backend/          # FastAPI + Python (Modular Monolith)
-│   ├── app/
-│   │   ├── api/      # REST endpoints (/api/v1)
-│   │   ├── core/     # Config, security, database
-│   │   ├── models/   # SQLAlchemy ORM models
-│   │   ├── schemas/  # Pydantic request/response
-│   │   ├── services/ # Business logic
-│   │   └── workers/  # Celery background tasks
-│   └── alembic/      # Database migrations
-├── frontend/         # React + Vite + TypeScript
-│   └── src/
-│       ├── components/  # Shared UI components
-│       ├── features/    # Feature modules
-│       ├── services/    # API client
-│       ├── hooks/       # Custom hooks
-│       └── types/       # TypeScript types
-└── docs/             # Documentation
+## Run locally
+
+Install Python 3.11+, Node.js 20+, and PostgreSQL 14+. Set `DATABASE_URL` in `backend/.env` to your local PostgreSQL connection. Copy `frontend/.env.example` to `frontend/.env`; its local API URL uses `127.0.0.1` to match Vite and keep the HttpOnly cookie same-site. From `backend`, create/activate `.venv` and install dependencies with `python -m venv .venv`, `.\.venv\Scripts\Activate.ps1`, and `pip install -r requirements.txt`. From `frontend`, install dependencies with `npm install`.
+
+Run each server in its own terminal using these commands only:
+
+Frontend:
+
+```powershell
+cd frontend
+npm run dev
 ```
 
-## Tech Stack
+Backend:
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | React 19 + Vite + TypeScript + Tailwind CSS |
-| Backend API | FastAPI + Python 3.12 |
-| Database | PostgreSQL + SQLAlchemy 2.x + Alembic |
-| Queue | Redis + Celery |
-| Storage | S3-compatible object storage |
-| OCR | Provider adapter (PaddleOCR/Tesseract/managed) |
-| LLM | Provider adapter with structured outputs |
-
-## Quick Start
-
-### Backend
-```bash
+```powershell
 cd backend
-python -m venv venv
-source venv/bin/activate  # or .\venv\Scripts\activate on Windows
-pip install -r requirements.txt
-cp .env.example .env      # Configure your settings
-alembic upgrade head      # Run migrations
+.\.venv\Scripts\Activate.ps1
 uvicorn app.main:app --reload
 ```
 
-### Frontend
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
+The frontend runs at `http://127.0.0.1:5173`; the backend API docs are at `http://127.0.0.1:8000/docs`. Apply the database migration once from `backend` with `alembic upgrade head`.
 
-## Product Scope (V1)
+The backend validates its PostgreSQL connection at startup and stops with an error if it cannot reach the configured database. The frontend requires `VITE_API_URL`; restart Vite after changing `frontend/.env`.
 
-- ✅ Medical document upload (PDF/images)
-- ✅ OCR and text extraction
-- ✅ Structured medical data extraction
-- ✅ Plain-language summaries
-- ✅ Reference-range flagging
-- ✅ Evidence-linked findings
-- ✅ My Records (searchable archive)
-- ✅ Health Analytics (trends)
-- ✅ PDF export
-- ❌ Legal/finance/insurance analysis (future)
-- ❌ Medical diagnosis or treatment advice
+## Tests
 
-## Safety
+The backend tests require a dedicated PostgreSQL database whose name includes `test`; they refuse to run against the database configured in `backend/.env`. Set `TEST_DATABASE_URL` to that separate database before running `python -m pytest -q` from `backend`. The tests clean up only rows in the dedicated test database.
 
-JohnnySummUP is **informational only**. It does not diagnose, prescribe, or replace professional medical advice.
+## Phase 1 data and authentication
 
-## License
+The only application table is `users`. Passwords are hashed with Argon2id. Browser authentication uses a short-lived HttpOnly JWT cookie; logout clears that cookie. The configured JWT secret, algorithm, and expiry are backend-only settings. OpenAI configuration is optional and is not used to make requests in Phase 1. The root `.gitignore` excludes `api.txt` and all `.env` files except the committed `.env.example` template.
 
-Private — All rights reserved.
+The official mascot artwork was not present when this baseline was created. Add the user-provided asset at `frontend/public/brand/johnnysummup-mascot.png` to enable the shared brand component's image placement. Favicon/app-icon links are intentionally omitted until the official artwork is available to derive them; no substitute mascot is included.
 
+For production, set `COOKIE_SECURE=true` and serve the frontend and API over HTTPS.

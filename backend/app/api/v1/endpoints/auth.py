@@ -1,131 +1,90 @@
-"""
-Authentication and user profile endpoints.
-"""
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
-from __future__ import annotations
-
-from typing import Any, Dict
-
-from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.dependencies import get_current_user, get_db
+from app.core.config import get_settings
+from app.core.database import get_db
+from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
-from app.schemas.auth import (
-    AuthResponseData,
-    ForgotPasswordRequest,
-    LoginRequest,
-    RegisterRequest,
-    ResetPasswordRequest,
-    UserResponse,
-    UserSettingsResponse,
-)
-from app.schemas.common import ApiResponse
-from app.services.auth_service import authenticate_user, get_user_settings, register_user
+from app.schemas.auth import LoginRequest, RegisterRequest, UserResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@router.post("/register", response_model=ApiResponse[AuthResponseData], status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    user, tokens = await register_user(db, data)
-    user_resp = UserResponse(
-        id=user.id,
-        email=user.email,
-        fullName=user.full_name,
-        isActive=user.is_active,
-        emailVerified=user.is_verified,
-        role=user.role,
+def is_duplicate_email_error(error: IntegrityError) -> bool:
+    original = error.orig
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
+    return sqlstate == "23505" and constraint_name == "uq_users_email"
+
+
+def set_auth_cookie(response: Response, user_id) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key="access_token",
+        value=create_access_token(user_id),
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.access_token_expire_minutes * 60,
+        path="/",
     )
-    return ApiResponse(
-        data=AuthResponseData(
-            user=user_resp,
-            tokens=tokens,
-            accessToken=tokens.access_token,
+
+
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def register(
+    payload: RegisterRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> User:
+    user = User(
+        full_name=payload.full_name,
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+    )
+    db.add(user)
+    try:
+        db.commit()
+        db.refresh(user)
+    except IntegrityError as error:
+        db.rollback()
+        if not is_duplicate_email_error(error):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists",
+        ) from error
+
+    set_auth_cookie(response, user.id)
+    return user
+
+
+@router.post("/login", response_model=UserResponse)
+def login(
+    payload: LoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> User:
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
         )
+
+    set_auth_cookie(response, user.id)
+    return user
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(response: Response) -> Response:
+    response.delete_cookie(
+        key="access_token",
+        path="/",
+        httponly=True,
+        secure=get_settings().cookie_secure,
+        samesite="lax",
     )
-
-
-@router.post("/login", response_model=ApiResponse[AuthResponseData])
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
-    user, tokens = await authenticate_user(db, data)
-    user_resp = UserResponse(
-        id=user.id,
-        email=user.email,
-        fullName=user.full_name,
-        isActive=user.is_active,
-        emailVerified=user.is_verified,
-        role=user.role,
-    )
-    return ApiResponse(
-        data=AuthResponseData(
-            user=user_resp,
-            tokens=tokens,
-            accessToken=tokens.access_token,
-        )
-    )
-
-
-@router.post("/logout", response_model=ApiResponse[Dict[str, str]])
-async def logout():
-    return ApiResponse(data={"message": "Logged out successfully."})
-
-
-@router.post("/forgot-password", response_model=ApiResponse[Dict[str, str]])
-async def forgot_password(data: ForgotPasswordRequest):
-    # Neutral response for privacy as per spec
-    return ApiResponse(data={"message": "If an account exists, a reset link has been dispatched."})
-
-
-@router.post("/reset-password", response_model=ApiResponse[Dict[str, str]])
-async def reset_password(data: ResetPasswordRequest):
-    return ApiResponse(data={"message": "Password reset successfully."})
-
-
-@router.get("/me", response_model=ApiResponse[UserResponse])
-async def get_me(current_user: User = Depends(get_current_user)):
-    user_resp = UserResponse(
-        id=current_user.id,
-        email=current_user.email,
-        fullName=current_user.full_name,
-        isActive=current_user.is_active,
-        emailVerified=current_user.is_verified,
-        role=current_user.role,
-    )
-    return ApiResponse(data=user_resp)
-
-
-@router.patch("/me", response_model=ApiResponse[UserResponse])
-async def update_me(
-    data: Dict[str, Any],
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    if "full_name" in data or "fullName" in data:
-        full_name = data.get("full_name") or data.get("fullName") or ""
-        parts = full_name.split(" ", 1)
-        current_user.first_name = parts[0]
-        current_user.last_name = parts[1] if len(parts) > 1 else ""
-
-    await db.commit()
-    await db.refresh(current_user)
-
-    user_resp = UserResponse(
-        id=current_user.id,
-        email=current_user.email,
-        fullName=current_user.full_name,
-        isActive=current_user.is_active,
-        emailVerified=current_user.is_verified,
-        role=current_user.role,
-    )
-    return ApiResponse(data=user_resp)
-
-
-@router.get("/me/settings", response_model=ApiResponse[UserSettingsResponse])
-async def get_my_settings(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    settings = await get_user_settings(db, current_user.id)
-    return ApiResponse(data=UserSettingsResponse.model_validate(settings))
-
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response

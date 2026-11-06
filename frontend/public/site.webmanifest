@@ -1,0 +1,9 @@
+{
+  "name": "JohnnySummUP",
+  "short_name": "JohnnySummUP",
+  "description": "Your brave document companion.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f6fc",
+  "theme_color": "#7c2ce8"
+}

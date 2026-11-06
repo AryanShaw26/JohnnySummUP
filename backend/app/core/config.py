@@ -1,128 +1,61 @@
-"""
-Application settings loaded from environment variables.
-"""
-
-from __future__ import annotations
-
-import os
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, List
+from typing import Literal
 
-from pydantic import field_validator
+from dotenv import load_dotenv
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+BACKEND_ROOT = PROJECT_ROOT / "backend"
 
 
 class Settings(BaseSettings):
-    """Central configuration sourced from .env / environment."""
-
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=BACKEND_ROOT / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
-    # ── Application ──────────────────────────────────────────────────────
-    APP_NAME: str = "JohnnySummUP"
-    APP_VERSION: str = "1.0.0"
-    APP_ENV: str = "development"
-    DEBUG: bool = True
-    API_PREFIX: str = "/api/v1"
+    database_url: str
+    jwt_secret_key: SecretStr
+    jwt_algorithm: Literal["HS256"] = "HS256"
+    access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
+    frontend_origin: str = "http://127.0.0.1:5173"
+    cookie_secure: bool = False
+    openai_api_key: SecretStr | None = None
 
-    @field_validator("DEBUG", mode="before")
+    @field_validator("jwt_secret_key")
     @classmethod
-    def _parse_debug(cls, v: Any) -> bool:
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str):
-            val = v.lower().strip()
-            if val in ("true", "1", "yes", "y", "debug", "dev", "development"):
-                return True
-            if val in ("false", "0", "no", "n", "release", "prod", "production"):
-                return False
-        return bool(v)
+    def require_strong_jwt_secret(cls, value: SecretStr) -> SecretStr:
+        secret = value.get_secret_value()
+        if len(secret) < 32 or secret.startswith("REPLACE_WITH_"):
+            raise ValueError("JWT_SECRET_KEY must be a randomly generated secret of at least 32 characters")
+        return value
 
-    # ── Server ───────────────────────────────────────────────────────────
-    HOST: str = "0.0.0.0"
-    PORT: int = 8000
-
-    # ── Database ─────────────────────────────────────────────────────────
-    DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR}/johnnysummup.db")
-    DATABASE_ECHO: bool = False
-    DATABASE_POOL_SIZE: int = 20
-    DATABASE_MAX_OVERFLOW: int = 10
-
-    # ── Redis ────────────────────────────────────────────────────────────
-    REDIS_URL: str = "redis://localhost:6379/0"
-
-    # ── JWT ──────────────────────────────────────────────────────────────
-    JWT_SECRET_KEY: str = "johnnysummup-brave-summarizer-secure-jwt-key-2026"
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 1 day
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-
-    # ── CORS ─────────────────────────────────────────────────────────────
-    CORS_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ]
-
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("database_url")
     @classmethod
-    def _parse_cors(cls, v: str | List[str]) -> List[str]:
-        if isinstance(v, str):
-            import json
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    def require_database_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("DATABASE_URL must not be empty")
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql+psycopg://", 1)
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        return value
 
-    # ── Storage ──────────────────────────────────────────────────────────
-    STORAGE_TYPE: str = "local"
-    UPLOAD_DIR: str = str(BASE_DIR / "uploads")
-    EXPORTS_DIR: str = str(BASE_DIR / "exports")
-    S3_BUCKET_NAME: str = "johnnysummup-documents"
-    S3_REGION: str = "us-east-1"
-    AWS_ACCESS_KEY_ID: str = ""
-    AWS_SECRET_ACCESS_KEY: str = ""
-    S3_ENDPOINT_URL: str = ""
-
-    # ── AI / ML Providers ────────────────────────────────────────────────
-    OCR_PROVIDER: str = "internal"
-    LLM_PROVIDER: str = "internal"
-    OPENAI_API_KEY: str = ""
-    GEMINI_API_KEY: str = ""
-
-    # ── Upload Limits ────────────────────────────────────────────────────
-    MAX_FILE_SIZE_BYTES: int = 20 * 1024 * 1024  # 20MB
-    MAX_PAGE_COUNT: int = 50
-    ALLOWED_MIME_TYPES: List[str] = [
-        "application/pdf",
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-    ]
-
-    # ── Celery ───────────────────────────────────────────────────────────
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
-
-    # ── Logging ──────────────────────────────────────────────────────────
-    LOG_LEVEL: str = "INFO"
-
-    @property
-    def is_production(self) -> bool:
-        return self.APP_ENV == "production"
+    @field_validator("openai_api_key", mode="before")
+    @classmethod
+    def normalize_optional_openai_key(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        return value
 
 
-settings = Settings()
-
-os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-os.makedirs(settings.EXPORTS_DIR, exist_ok=True)
+@lru_cache
+def get_settings() -> Settings:
+    load_dotenv(BACKEND_ROOT / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / "api.txt", override=False)
+    return Settings()

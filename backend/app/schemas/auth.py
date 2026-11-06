@@ -1,74 +1,40 @@
-"""
-Authentication and user schemas.
-"""
-
-from __future__ import annotations
-
-from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class RegisterRequest(BaseModel):
+    full_name: str = Field(min_length=1, max_length=150)
     email: EmailStr
-    password: str = Field(min_length=6)
-    full_name: Optional[str] = Field(default=None, alias="fullName")
-    accept_terms: bool = Field(default=True, alias="acceptTerms")
-    accept_privacy: bool = Field(default=True, alias="acceptPrivacy")
+    password: str = Field(min_length=8, max_length=128)
 
-    model_config = ConfigDict(populate_by_name=True)
+    @field_validator("full_name")
+    @classmethod
+    def normalize_full_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Full name is required")
+        return normalized
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=128)
 
-
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str
-    new_password: str = Field(min_length=6, alias="newPassword")
-
-    model_config = ConfigDict(populate_by_name=True)
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
 
 
 class UserResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    email: str
-    full_name: str = Field(alias="fullName")
-    is_active: bool = Field(default=True, alias="isActive")
-    is_verified: bool = Field(default=False, alias="emailVerified")
-    role: str = "patient"
-
-
-class AuthTokens(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    access_token: str = Field(alias="accessToken")
-    refresh_token: str = Field(alias="refreshToken")
-    token_type: str = Field(default="Bearer", alias="tokenType")
-    expires_in: int = Field(default=86400, alias="expiresIn")
-
-
-class AuthResponseData(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    user: UserResponse
-    tokens: AuthTokens
-    accessToken: Optional[str] = None  # for camelCase frontend direct access
-
-
-class UserSettingsResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-
-    timezone: str = "UTC"
-    preferred_unit_system: str = Field(default="metric", alias="preferredUnitSystem")
-    language: str = "en"
-    default_export_format: str = Field(default="pdf", alias="defaultExportFormat")
-
+    full_name: str
+    email: EmailStr

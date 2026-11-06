@@ -1,53 +1,24 @@
-"""
-User model – ``users`` table.
-"""
-
-from __future__ import annotations
-
-import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional
+from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, String, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import DateTime, String, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import Uuid
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-
-if TYPE_CHECKING:
-    from app.models.audit_event import AuditEvent
-    from app.models.medical_document import MedicalDocument
-    from app.models.user_settings import UserSettings
+from app.models.base import Base
 
 
-class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
 
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    full_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    first_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
-    last_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
-    phone_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    date_of_birth: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"), nullable=False)
-    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="patient", nullable=False)
-    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    @property
-    def full_name(self) -> str:
-        name = f"{self.first_name} {self.last_name}".strip()
-        return name if name else self.email.split("@")[0]
-
-    # Relationships
-    settings: Mapped[Optional["UserSettings"]] = relationship(
-        "UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan",
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    medical_documents: Mapped[List["MedicalDocument"]] = relationship(
-        "MedicalDocument", back_populates="user", cascade="all, delete-orphan",
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
-    audit_events: Mapped[List["AuditEvent"]] = relationship(
-        "AuditEvent", back_populates="user", cascade="all, delete-orphan",
-    )
-
-    def __repr__(self) -> str:
-        return f"<User {self.email}>"

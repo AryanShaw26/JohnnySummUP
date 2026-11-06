@@ -1,86 +1,54 @@
-"""
-JohnnySummUP — FastAPI Application Entrypoint.
-Medical Document Intelligence Platform.
-"""
-
-from __future__ import annotations
-
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.v1.router import api_router
-from app.core.config import settings
-from app.core.database import init_db
-from app.core.errors import (
-    AppException,
-    app_exception_handler,
-    http_exception_handler,
-    unhandled_exception_handler,
-)
+from app.core.config import get_settings
+from app.core.database import get_engine
 
-logging.basicConfig(
-    level=settings.LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("johnnysummup")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan context for startup and shutdown."""
-    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} ({settings.APP_ENV})...")
-    await init_db()
-    logger.info("Database schemas verified.")
+async def lifespan(_: FastAPI):
+    settings = get_settings()
+    with get_engine().connect() as connection:
+        connection.execute(text("SELECT 1"))
+    if settings.openai_api_key is None:
+        logger.info("Optional future-phase OpenAI integration is not configured")
     yield
-    logger.info("Shutting down...")
 
 
-app = FastAPI(
-    title=settings.APP_NAME,
-    description="Medical-first AI document intelligence platform — Your brave summarizer 🔍",
-    version=settings.APP_VERSION,
-    lifespan=lifespan,
-    docs_url="/docs" if settings.DEBUG else None,
-    redoc_url="/redoc" if settings.DEBUG else None,
-)
+def create_app() -> FastAPI:
+    settings = get_settings()
+    frontend_origins = [settings.frontend_origin]
+    development_origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
+    if settings.frontend_origin in development_origins:
+        frontend_origins = sorted(development_origins)
 
-# ── CORS Middleware ─────────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    app = FastAPI(
+        title="JohnnySummUP API",
+        description="Phase 1 account and authentication API.",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=frontend_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
+    app.include_router(api_router, prefix="/api")
 
-# ── Exception Handlers ──────────────────────────────────────────────────────
-app.add_exception_handler(AppException, app_exception_handler)
-app.add_exception_handler(HTTPException, http_exception_handler)
-app.add_exception_handler(Exception, unhandled_exception_handler)
+    @app.get("/health", tags=["health"])
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
 
-# ── Mount Routers ───────────────────────────────────────────────────────────
-app.include_router(api_router, prefix=settings.API_PREFIX)
-
-
-@app.get("/health", tags=["Health"])
-async def health_check():
-    return {
-        "status": "healthy",
-        "app": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "environment": settings.APP_ENV,
-    }
+    return app
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "name": settings.APP_NAME,
-        "tagline": "Your brave summarizer 🔍",
-        "version": settings.APP_VERSION,
-        "docs": "/docs" if settings.DEBUG else None,
-    }
-
+app = create_app()

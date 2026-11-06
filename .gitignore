@@ -1,52 +1,26 @@
-# Dependencies
-node_modules/
-__pycache__/
-*.pyc
-*.pyo
-venv/
-.venv/
-env/
-
-# Environment
+# Secrets and local configuration
+api.txt
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+backend/.env
+frontend/.env
 
-# Build
-dist/
-build/
-*.egg-info/
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Frontend
+node_modules/
+frontend/dist/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Database
-*.db
+# Local databases and tooling
+*.sqlite
 *.sqlite3
-
-# Uploads (local dev)
-uploads/
-temp/
-
-# Coverage
-htmlcov/
+*.db
 .coverage
-coverage.xml
-
-# Secrets
-*.pem
-*.key
-secrets/
-
+htmlcov/
+*.tsbuildinfo
