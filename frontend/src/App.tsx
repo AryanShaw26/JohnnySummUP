@@ -9,6 +9,22 @@ import { LandingPage } from "./pages/LandingPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
+import { PrescriptionsPage } from "./pages/medical/Prescriptions";
+import { LaboratoryReportsPage } from "./pages/medical/LaboratoryReports";
+import { MedicalWorkspace } from "./pages/medical/MedicalWorkspace";
+import { MedicalOverviewPage } from "./pages/medical/MedicalOverview";
+import { UploadReportPage } from "./pages/medical/UploadReport";
+import { AllReportsPage } from "./pages/medical/AllReports";
+import { ReportSummaryPage } from "./pages/medical/ReportSummary";
+import { ExtractedFindingsPage } from "./pages/medical/ExtractedFindings";
+import { AbnormalityFlagsPage } from "./pages/medical/AbnormalityFlags";
+import { HealthTrendsPage } from "./pages/medical/HealthTrends";
+import { ParameterComparisonPage } from "./pages/medical/ParameterComparison";
+import { HistoricalAnalyticsPage } from "./pages/medical/HistoricalAnalytics";
+import { PreviousUploadsPage } from "./pages/medical/PreviousUploads";
+import { PreviousSummariesPage } from "./pages/medical/PreviousSummaries";
+import { ReportTimelinePage } from "./pages/medical/ReportTimeline";
+
 function ProtectedRoutes() {
   const { status } = useAuth();
   if (status === "loading") return <AuthLoading />;
@@ -36,6 +52,35 @@ export default function App() {
             <Route path="/app" element={<AppLayout />}>
               <Route index element={<OverviewPage />} />
               <Route path="settings" element={<SettingsPage />} />
+
+              {/* Medical Workspace */}
+              <Route path="medical" element={<MedicalWorkspace />}>
+                <Route index element={<MedicalOverviewPage />} />
+
+                {/* Documents */}
+                <Route path="documents" element={<AllReportsPage />} />
+                <Route path="documents/upload" element={<UploadReportPage />} />
+                <Route path="documents/prescriptions" element={<PrescriptionsPage />} />
+                <Route path="documents/laboratory" element={<LaboratoryReportsPage />} />
+                <Route path="documents/:documentId" element={<ReportSummaryPage />} />
+
+                {/* AI Analysis */}
+                <Route path="analysis/summaries" element={<PreviousSummariesPage />} />
+                <Route path="analysis/findings" element={<ExtractedFindingsPage />} />
+                <Route path="analysis/flags" element={<AbnormalityFlagsPage />} />
+
+                {/* Health Analytics */}
+                <Route path="analytics/trends" element={<HealthTrendsPage />} />
+                <Route path="analytics/comparison" element={<ParameterComparisonPage />} />
+                <Route path="analytics/history" element={<HistoricalAnalyticsPage />} />
+
+                {/* History */}
+                <Route path="history/uploads" element={<PreviousUploadsPage />} />
+                <Route path="history/summaries" element={<PreviousSummariesPage />} />
+                <Route path="history/timeline" element={<ReportTimelinePage />} />
+              </Route>
+
+              {/* Other domain placeholders */}
               <Route path=":domain" element={<DomainPage />} />
             </Route>
           </Route>
