@@ -34,7 +34,9 @@ export function AppLayout() {
       ? "Overview"
       : location.pathname === "/app/settings"
         ? "Settings"
-        : navigation.find((item) => item.path === location.pathname)?.label ?? "Overview";
+        : location.pathname.startsWith("/app/medical")
+          ? "Medical"
+          : navigation.find((item) => item.path === location.pathname)?.label ?? "Overview";
 
   return (
     <div className="app-shell">
@@ -54,7 +56,14 @@ export function AppLayout() {
             <ChevronRight className="nav-item__chevron" size={15} aria-hidden="true" />
           </NavLink>
           {navigation.map(({ label, path, icon: Icon }) => (
-            <NavLink key={path} to={path} onClick={() => setMenuOpen(false)} className={({ isActive }) => `nav-item ${isActive ? "nav-item--active" : ""}`}>
+            <NavLink
+              key={path}
+              to={path}
+              onClick={() => setMenuOpen(false)}
+              className={({ isActive }) =>
+                `nav-item ${isActive || (path === "/app/medical" && location.pathname.startsWith("/app/medical")) ? "nav-item--active" : ""}`
+              }
+            >
               <Icon size={18} aria-hidden="true" />
               <span>{label}</span>
               <ChevronRight className="nav-item__chevron" size={15} aria-hidden="true" />

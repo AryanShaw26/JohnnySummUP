@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
     openai_api_key: SecretStr | None = None
+    medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
+    medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
+    medical_allowed_extensions: list[str] = [".pdf", ".jpg", ".jpeg", ".png"]
 
     @field_validator("jwt_secret_key")
     @classmethod
