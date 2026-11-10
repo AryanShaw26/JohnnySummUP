@@ -128,26 +128,14 @@ class OCREngine:
 
 
 class DocumentExtractionService:
-<<<<<<< HEAD
+    """Production extraction pipeline for PDFs, Scanned PDFs, and Images."""
+
     @staticmethod
     def image_data_url(file_path: Path, mime_type: str) -> str:
         if mime_type not in {"image/jpeg", "image/png"}:
             raise ValueError(f"Unsupported image MIME type: {mime_type}")
         encoded_image = base64.b64encode(file_path.read_bytes()).decode("ascii")
         return f"data:{mime_type};base64,{encoded_image}"
-
-    @staticmethod
-    def extract_text(file_path: Path, mime_type: str) -> tuple[str, list[dict], int]:
-        """
-        Extracts textual content and page metadata from supported documents.
-        Returns: (full_text, pages_data, page_count)
-        """
-        full_text_parts = []
-        pages_data = []
-        page_count = 1
-=======
-    """Production extraction pipeline for PDFs, Scanned PDFs, and Images."""
->>>>>>> aryan
 
     @staticmethod
     def preprocess_image(image: Image.Image) -> Image.Image:

@@ -24,5 +24,6 @@ frontend/dist/
 .coverage
 htmlcov/
 *.tsbuildinfo
+private_uploads/
 backend/private_uploads/
 backend/pgdata/

@@ -259,7 +259,6 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
-    provider: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -271,16 +270,18 @@ async def analyze_document(
         )
 
     file_path = storage_service.get_file_path(doc.storage_key, current_user.id)
-<<<<<<< HEAD
-    extracted_text, _, _ = extraction_service.extract_text(file_path, doc.mime_type)
-    image_data_url = (
-        extraction_service.image_data_url(file_path, doc.mime_type)
-        if doc.mime_type.startswith("image/")
-        else None
-    )
-=======
     extraction_result = extraction_service.extract_document(file_path, doc.mime_type)
->>>>>>> aryan
+
+    if extraction_result.status in ("corrupt", "encrypted", "unsupported") or not extraction_result.text.strip():
+        doc.status = "failed"
+        doc.failure_code = extraction_result.error_code or "extraction_failed"
+        doc.failure_message = extraction_result.error_message or "We could not extract readable text from this document."
+        db.commit()
+        db.refresh(doc)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=doc.failure_message,
+        )
 
     analysis = await analysis_service.run_analysis(
         db=db,
@@ -288,11 +289,6 @@ async def analyze_document(
         user_id=current_user.id,
         extracted_text=extraction_result.text,
         document_type=doc.document_type,
-<<<<<<< HEAD
-        image_data_url=image_data_url,
-=======
-        requested_provider=provider,
->>>>>>> aryan
     )
     return DocumentAnalysisResponse.model_validate(analysis)
 
@@ -581,8 +577,7 @@ def get_provider_diagnostics(
 
 @router.post("/diagnostics/test")
 async def test_provider_connection(
-    provider: str = Query("openai"),
     current_user: User = Depends(get_current_user),
 ):
-    """Tests connectivity to the requested provider using a minimal non-medical ping."""
-    return await analysis_service.test_provider_connectivity(provider)
+    """Tests connectivity to Gemini using a minimal non-medical ping."""
+    return await analysis_service.test_provider_connectivity()

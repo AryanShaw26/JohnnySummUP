@@ -25,17 +25,10 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
-    openai_api_key: SecretStr | None = None
-<<<<<<< HEAD
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=120)
-=======
-    openai_model: str = "gpt-4o-mini"
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-1.5-flash"
-    default_ai_provider: Literal["openai", "gemini"] = "openai"
+    gemini_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=120)
+    openai_api_key: SecretStr | None = None
     tesseract_cmd: str | None = None
->>>>>>> aryan
     medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
     medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
@@ -61,34 +54,26 @@ class Settings(BaseSettings):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
         return value
 
-    @field_validator("openai_api_key", mode="before")
-    @classmethod
-    def normalize_optional_openai_key(cls, value):
-        if value is None or not str(value).strip():
-            return None
-        return value
-
-<<<<<<< HEAD
-    @field_validator("openai_base_url")
-    @classmethod
-    def validate_openai_base_url(cls, value: str) -> str:
-        value = value.strip().rstrip("/")
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
-            raise ValueError("OPENAI_BASE_URL must be an HTTP(S) base URL without a query or fragment")
-        return value
-=======
     @field_validator("gemini_api_key", mode="before")
     @classmethod
     def normalize_optional_gemini_key(cls, value):
         if value is not None and str(value).strip():
-            return str(value).strip()
+            s = str(value).strip()
+            if not s.startswith("PASTE_") and not s.startswith("REPLACE_"):
+                return s
         import os
         google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-        if google_key:
+        if google_key and not google_key.startswith("PASTE_"):
             return google_key
         return None
->>>>>>> aryan
+
+    @field_validator("gemini_model")
+    @classmethod
+    def validate_gemini_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return "gemini-2.5-flash"
+        return value
 
 
 @lru_cache

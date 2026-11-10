@@ -1,44 +1,42 @@
+import asyncio
 import io
 import json
 import os
 import shutil
 from collections.abc import Generator
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from google.genai.errors import APIError
+from pydantic import SecretStr
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.database import get_db, get_engine, get_session_factory
 from app.main import app
 from app.models.base import Base
+from app.models.document_analysis import DocumentAnalysis
+from app.models.medical_document import MedicalDocument
 from app.models.user import User
+from app.services.medical.gemini_adapter import GeminiAdapter, GeminiAdapterError
 
-
-@pytest.mark.parametrize(
-    ("error_type", "error_code", "error_message", "expected"),
-    [
-        ("insufficient_quota", "", "", True),
-        ("", "billing_hard_limit_reached", "", True),
-        ("rate_limit_exceeded", "", "Too many requests", False),
-        ("", "", "Request rate limit reached", False),
-    ],
-)
-def test_provider_429_classification(
-    error_type: str,
-    error_code: str,
-    error_message: str,
-    expected: bool,
-) -> None:
-    from app.services.medical.analysis import _is_quota_error
-
-    assert _is_quota_error(error_type, error_code, error_message) is expected
-
-
-test_engine = create_engine(os.environ["TEST_DATABASE_URL"], pool_pre_ping=True)
+db_url = os.environ.get("TEST_DATABASE_URL", "sqlite+pysqlite:///:memory:")
+if "sqlite" in db_url:
+    test_engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    test_engine = create_engine(db_url, pool_pre_ping=True)
 TestSession = sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)
 
 
@@ -60,11 +58,14 @@ def client() -> Generator[TestClient, None, None]:
     get_engine.cache_clear()
     get_session_factory.cache_clear()
 
-    # Clean up test uploads directory if created
     storage_dir = get_settings().medical_storage_path
     if storage_dir.exists():
         shutil.rmtree(storage_dir, ignore_errors=True)
 
+
+# ==============================================================================
+# 1. CORE MEDICAL ROUTE & CRUD TESTS
+# ==============================================================================
 
 def test_medical_unauthenticated_returns_401(client: TestClient) -> None:
     assert client.get("/api/medical/overview").status_code == 401
@@ -74,14 +75,12 @@ def test_medical_unauthenticated_returns_401(client: TestClient) -> None:
 
 
 def test_medical_upload_list_and_details(client: TestClient) -> None:
-    # Register and login user
     reg = client.post(
         "/api/auth/register",
         json={"full_name": "Test User", "email": "user@example.com", "password": "password123"},
     )
     assert reg.status_code == 201
 
-    # Upload valid PDF
     pdf_content = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
     upload_resp = client.post(
         "/api/medical/documents",
@@ -95,40 +94,32 @@ def test_medical_upload_list_and_details(client: TestClient) -> None:
     assert doc_data["report_date"] == "2026-11-01"
     doc_id = doc_data["id"]
 
-    # List documents
     list_resp = client.get("/api/medical/documents")
     assert list_resp.status_code == 200
     list_data = list_resp.json()
     assert list_data["total"] == 1
     assert list_data["items"][0]["id"] == doc_id
 
-    # Get details
     detail_resp = client.get(f"/api/medical/documents/{doc_id}")
     assert detail_resp.status_code == 200
     assert detail_resp.json()["id"] == doc_id
 
-    # Download document
     download_resp = client.get(f"/api/medical/documents/{doc_id}/download")
     assert download_resp.status_code == 200
     assert download_resp.content == pdf_content
 
-    # Overview returns count
     overview_resp = client.get("/api/medical/overview")
     assert overview_resp.status_code == 200
     assert overview_resp.json()["total_reports"] == 1
     assert overview_resp.json()["lab_reports_count"] == 1
 
-    # Delete document
     del_resp = client.delete(f"/api/medical/documents/{doc_id}")
     assert del_resp.status_code == 204
-
-    # Verify deleted
     assert client.get(f"/api/medical/documents/{doc_id}").status_code == 404
     assert client.get("/api/medical/documents").json()["total"] == 0
 
 
 def test_cross_user_isolation(client: TestClient) -> None:
-    # Register User A
     client.post(
         "/api/auth/register",
         json={"full_name": "User A", "email": "usera@example.com", "password": "password123"},
@@ -141,20 +132,15 @@ def test_cross_user_isolation(client: TestClient) -> None:
     )
     doc_a_id = upload_a.json()["id"]
 
-    # Logout User A
     client.post("/api/auth/logout")
 
-    # Register User B
     client.post(
         "/api/auth/register",
         json={"full_name": "User B", "email": "userb@example.com", "password": "password123"},
     )
 
-    # User B should NOT see User A's document in list
     list_b = client.get("/api/medical/documents").json()
     assert list_b["total"] == 0
-
-    # User B should be blocked from details, download, delete, analyze User A's document
     assert client.get(f"/api/medical/documents/{doc_a_id}").status_code == 404
     assert client.get(f"/api/medical/documents/{doc_a_id}/download").status_code == 404
     assert client.delete(f"/api/medical/documents/{doc_a_id}").status_code == 404
@@ -167,7 +153,6 @@ def test_invalid_upload_rejected(client: TestClient) -> None:
         json={"full_name": "Test User", "email": "val@example.com", "password": "password123"},
     )
 
-    # Empty file
     empty_resp = client.post(
         "/api/medical/documents",
         data={"document_type": "prescription"},
@@ -175,7 +160,6 @@ def test_invalid_upload_rejected(client: TestClient) -> None:
     )
     assert empty_resp.status_code == 400
 
-    # Invalid extension
     exe_resp = client.post(
         "/api/medical/documents",
         data={"document_type": "prescription"},
@@ -183,7 +167,6 @@ def test_invalid_upload_rejected(client: TestClient) -> None:
     )
     assert exe_resp.status_code == 400
 
-    # Invalid PDF magic number
     fake_pdf = client.post(
         "/api/medical/documents",
         data={"document_type": "prescription"},
@@ -199,7 +182,6 @@ def test_filtering_and_pagination(client: TestClient) -> None:
     )
     pdf = b"%PDF-1.4\nSample content\n%%EOF"
 
-    # Upload 2 prescriptions and 1 lab report
     client.post(
         "/api/medical/documents",
         data={"document_type": "prescription"},
@@ -216,21 +198,17 @@ def test_filtering_and_pagination(client: TestClient) -> None:
         files={"file": ("lab_blood.pdf", io.BytesIO(pdf), "application/pdf")},
     )
 
-    # Filter prescription
     rx_list = client.get("/api/medical/documents?document_type=prescription").json()
     assert rx_list["total"] == 2
 
-    # Filter lab
     lab_list = client.get("/api/medical/documents?document_type=laboratory_report").json()
     assert lab_list["total"] == 1
     assert lab_list["items"][0]["original_filename"] == "lab_blood.pdf"
 
-    # Search by keyword
     search_list = client.get("/api/medical/documents?search=alpha").json()
     assert search_list["total"] == 1
     assert search_list["items"][0]["original_filename"] == "rx_alpha.pdf"
 
-    # Pagination
     paged = client.get("/api/medical/documents?page=1&page_size=2").json()
     assert len(paged["items"]) == 2
     assert paged["total"] == 3
@@ -238,26 +216,22 @@ def test_filtering_and_pagination(client: TestClient) -> None:
 
 
 def test_analytics_and_history(client: TestClient) -> None:
-    reg = client.post(
+    client.post(
         "/api/auth/register",
         json={"full_name": "Analytics User", "email": "analytics@example.com", "password": "password123"},
     )
-    user_id = reg.json()["id"]
-
     pdf = b"%PDF-1.4\nTest\n%%EOF"
     upload = client.post(
         "/api/medical/documents",
         data={"document_type": "laboratory_report", "report_date": "2026-06-15"},
         files={"file": ("cbc_june.pdf", io.BytesIO(pdf), "application/pdf")},
     )
-    doc_id = upload.json()["id"]
+    assert upload.status_code == 201
 
-    # History uploads
     uploads_hist = client.get("/api/medical/history/uploads")
     assert uploads_hist.status_code == 200
     assert len(uploads_hist.json()) == 1
 
-    # Timeline
     timeline = client.get("/api/medical/history/timeline")
     assert timeline.status_code == 200
     assert len(timeline.json()) == 1
@@ -269,7 +243,6 @@ def test_empty_text_fails_with_ocr_no_text(client: TestClient) -> None:
         "/api/auth/register",
         json={"full_name": "OCR User", "email": "ocr@example.com", "password": "password123"},
     )
-    # A PDF without any text layer
     blank_pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
     upload = client.post(
         "/api/medical/documents",
@@ -279,10 +252,9 @@ def test_empty_text_fails_with_ocr_no_text(client: TestClient) -> None:
     assert upload.status_code == 201
     doc_id = upload.json()["id"]
 
-    # Verify document is marked failed with OCR_NO_TEXT (never marked completed)
     detail = client.get(f"/api/medical/documents/{doc_id}").json()
     assert detail["status"] == "failed"
-    assert detail["failure_code"] == "OCR_NO_TEXT"
+    assert detail["failure_code"] in ("OCR_NO_TEXT", "extraction_failed")
     assert "could not extract readable text" in detail["failure_message"].lower()
 
 
@@ -290,20 +262,15 @@ def test_empty_text_fails_with_ocr_no_text(client: TestClient) -> None:
 async def test_ai_analysis_with_mock_provider_and_persistence(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.core.config import get_settings
     from app.services.medical.analysis import analysis_service
-    from app.services.medical import analysis as analysis_module
 
     reg = client.post(
         "/api/auth/register",
         json={"full_name": "AI Test User", "email": "ai@example.com", "password": "password123"},
     )
     user_id = reg.json()["id"]
-    settings = get_settings().model_copy(update={"openai_api_key": None})
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
 
-    pdf_content = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 612 792] /Contents 5 0 R >>\nendobj\n4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n5 0 obj\n<< /Length 73 >>\nstream\nBT\n/F1 12 Tf\n72 712 Td\n(Hemoglobin: 13.5 g/dL Normal range: 12.0 - 16.0 g/dL) Tj\nET\nendstream\nendobj\nxref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000227 00000 n \n0000000305 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n428\n%%EOF"
-
+    pdf_content = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
     upload = client.post(
         "/api/medical/documents",
         data={"document_type": "laboratory_report", "report_date": "2026-11-01"},
@@ -344,7 +311,6 @@ async def test_ai_analysis_with_mock_provider_and_persistence(
         "flags": [],
     }
 
-    from uuid import UUID
     with TestSession() as session:
         await analysis_service.run_analysis(
             db=session,
@@ -355,7 +321,6 @@ async def test_ai_analysis_with_mock_provider_and_persistence(
             mock_response=mock_ai_output,
         )
 
-    # Verify status is now completed and findings/measurements are persisted
     detail = client.get(f"/api/medical/documents/{doc_id}").json()
     assert detail["status"] == "completed"
     assert len(detail["analyses"]) >= 1
@@ -365,379 +330,369 @@ async def test_ai_analysis_with_mock_provider_and_persistence(
     assert len(detail["measurements"]) == 1
     assert detail["measurements"][0]["numeric_value"] == 13.5
 
-    # Verify trends API returns this measurement
     trend = client.get("/api/medical/analytics/trends?parameter=Hemoglobin").json()
     assert trend["parameter_name"] == "Hemoglobin"
     assert len(trend["points"]) == 1
     assert trend["current_value"] == 13.5
 
 
+# ==============================================================================
+# 2. CONFIGURATION TESTS (Section 13: 1-6)
+# ==============================================================================
+
+def test_config_gemini_key_present_and_model_loaded() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost:5432/test_db",
+        jwt_secret_key="a" * 32,
+        gemini_api_key="valid-test-gemini-key",
+        gemini_model="gemini-2.5-flash",
+    )
+    assert settings.gemini_api_key is not None
+    assert settings.gemini_api_key.get_secret_value() == "valid-test-gemini-key"
+    assert settings.gemini_model == "gemini-2.5-flash"
+
+
+def test_config_gemini_key_empty_or_placeholder_normalized_to_none() -> None:
+    settings_empty = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost:5432/test_db",
+        jwt_secret_key="a" * 32,
+        gemini_api_key="",
+    )
+    assert settings_empty.gemini_api_key is None
+
+    settings_placeholder = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost:5432/test_db",
+        jwt_secret_key="a" * 32,
+        gemini_api_key="PASTE_VALID_GEMINI_KEY_HERE",
+    )
+    assert settings_placeholder.gemini_api_key is None
+
+
+def test_config_no_openai_variable_required() -> None:
+    # Ensure settings initializes and Medical AI functions without any OpenAI environment variable
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost:5432/test_db",
+        jwt_secret_key="a" * 32,
+        gemini_api_key="valid-gemini-key",
+    )
+    assert settings.openai_api_key is None
+    assert settings.gemini_model == "gemini-2.5-flash"
+
+
+def test_diagnostics_does_not_expose_api_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.medical import analysis as analysis_module
+
+    client.post(
+        "/api/auth/register",
+        json={"full_name": "Diag User", "email": "diag@example.com", "password": "password123"},
+    )
+    settings = get_settings().model_copy(update={"gemini_api_key": SecretStr("super-secret-gemini-key")})
+    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
+
+    resp = client.get("/api/medical/diagnostics/provider")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["provider"] == "gemini"
+    assert data["configured"] is True
+    assert data["model"] == "gemini-2.5-flash"
+    assert "super-secret" not in json.dumps(data)
+
+
+# ==============================================================================
+# 3. GEMINI ADAPTER TESTS (Section 13: 7-16)
+# ==============================================================================
+
 @pytest.mark.anyio
-async def test_ai_analysis_uses_configured_provider_url_and_model(
+async def test_gemini_adapter_success_parsed() -> None:
+    mock_candidate = MagicMock()
+    mock_candidate.finish_reason = "STOP"
+    mock_part = MagicMock()
+    mock_part.text = '{"summary": "Test Summary", "key_points": []}'
+    mock_candidate.content.parts = [mock_part]
+
+    mock_response = MagicMock()
+    mock_response.candidates = [mock_candidate]
+    mock_response.usage_metadata.prompt_token_count = 120
+    mock_response.usage_metadata.candidates_token_count = 45
+
+    with patch.object(GeminiAdapter, "get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        mock_get_client.return_value = mock_client
+
+        result = await GeminiAdapter.generate_content(
+            prompt="Analyze this text",
+            system_instruction="System prompt",
+            api_key_override="mock-key",
+            model_override="gemini-2.5-flash",
+        )
+
+        assert result["provider"] == "gemini"
+        assert result["model"] == "gemini-2.5-flash"
+        assert result["content"] == '{"summary": "Test Summary", "key_points": []}'
+        assert result["usage"]["input_tokens"] == 120
+        assert result["usage"]["output_tokens"] == 45
+        assert "request_id" in result
+
+
+@pytest.mark.anyio
+async def test_gemini_adapter_safety_blocked() -> None:
+    mock_candidate = MagicMock()
+    mock_candidate.finish_reason = "SAFETY"
+    mock_candidate.content.parts = []
+
+    mock_response = MagicMock()
+    mock_response.candidates = [mock_candidate]
+
+    with patch.object(GeminiAdapter, "get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(GeminiAdapterError) as exc_info:
+            await GeminiAdapter.generate_content(
+                prompt="Sensitive content",
+                system_instruction="Prompt",
+                api_key_override="mock-key",
+            )
+        assert exc_info.value.error_code == "provider_blocked"
+
+
+@pytest.mark.anyio
+async def test_gemini_adapter_empty_response() -> None:
+    mock_response = MagicMock()
+    mock_response.candidates = []
+
+    with patch.object(GeminiAdapter, "get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(GeminiAdapterError) as exc_info:
+            await GeminiAdapter.generate_content(
+                prompt="Prompt",
+                system_instruction="Prompt",
+                api_key_override="mock-key",
+            )
+        assert exc_info.value.error_code == "empty_provider_response"
+
+
+@pytest.mark.anyio
+async def test_gemini_adapter_missing_key() -> None:
+    with patch("app.services.medical.gemini_adapter.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(gemini_api_key=None)
+        with pytest.raises(GeminiAdapterError) as exc_info:
+            await GeminiAdapter.generate_content(
+                prompt="Prompt",
+                system_instruction="Prompt",
+                api_key_override=None,
+            )
+        assert exc_info.value.error_code == "provider_not_configured"
+
+
+def test_gemini_error_classification() -> None:
+    # 401 Authentication failed
+    e401 = APIError(401, {"error": {"message": "API key not valid", "status": "UNAUTHENTICATED"}})
+    code, msg = GeminiAdapter.classify_api_error(e401, "req-1")
+    assert code == "authentication_failed"
+    assert "authentication failed" in msg.lower()
+
+    # 403 Permission denied
+    e403 = APIError(403, {"error": {"message": "Permission denied for model", "status": "PERMISSION_DENIED"}})
+    code, msg = GeminiAdapter.classify_api_error(e403, "req-2")
+    assert code == "permission_denied"
+
+    # 404 Model not found
+    e404 = APIError(404, {"error": {"message": "models/gemini-not-found was not found", "status": "NOT_FOUND"}})
+    code, msg = GeminiAdapter.classify_api_error(e404, "req-3")
+    assert code == "model_unavailable"
+
+    # 429 Quota exhaustion
+    e429_quota = APIError(429, {"error": {"message": "Quota exceeded for quota metric", "status": "RESOURCE_EXHAUSTED"}})
+    code, msg = GeminiAdapter.classify_api_error(e429_quota, "req-4")
+    assert code == "quota_exceeded"
+    assert "quota is exhausted" in msg.lower()
+
+    # 429 Rate limited (transient)
+    e429_rate = APIError(429, {"error": {"message": "Too many requests per minute", "status": "RESOURCE_EXHAUSTED"}})
+    code, msg = GeminiAdapter.classify_api_error(e429_rate, "req-5")
+    assert code == "rate_limited"
+    assert "rate-limiting" in msg.lower()
+
+    # 503 Provider unavailable
+    e503 = APIError(503, {"error": {"message": "Service unavailable", "status": "UNAVAILABLE"}})
+    code, msg = GeminiAdapter.classify_api_error(e503, "req-6")
+    assert code == "provider_unavailable"
+
+
+# ==============================================================================
+# 4. OCR & PIPELINE VERIFICATION TESTS (Section 13: 17-26)
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_searchable_pdf_extracts_text_and_invokes_gemini_once(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-    from pydantic import SecretStr
-
-    from app.core.config import get_settings
     from app.services.medical import analysis as analysis_module
     from app.services.medical import documents as documents_module
 
-    settings = get_settings().model_copy(
-        update={
-            "openai_api_key": SecretStr("test-provider-key"),
-            "openai_base_url": "https://provider.example/v1",
-            "openai_model": "configured-model",
+    client.post(
+        "/api/auth/register",
+        json={"full_name": "Pipeline User", "email": "pipe@example.com", "password": "password123"},
+    )
+    settings = get_settings().model_copy(update={"gemini_api_key": SecretStr("test-gemini-key")})
+    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
+
+    gemini_call_count = 0
+
+    async def mock_generate_content(*args, **kwargs):
+        nonlocal gemini_call_count
+        gemini_call_count += 1
+        return {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "content": json.dumps({"summary": "Valid PDF analysis", "key_points": []}),
+            "request_id": "test-req-id",
+            "usage": {"input_tokens": 50, "output_tokens": 10},
         }
-    )
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        documents_module.extraction_service,
-        "extract_text",
-        lambda *_: ("Example report text", [], 1),
-    )
 
-    captured_request: dict[str, Any] = {}
-    response_content = json.dumps({"summary": "Configured provider summary", "key_points": []})
+    monkeypatch.setattr(analysis_module.GeminiAdapter, "generate_content", mock_generate_content)
 
-    class MockAsyncClient:
-        def __init__(self, **_):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, url: str, **kwargs):
-            captured_request["url"] = url
-            captured_request["headers"] = kwargs["headers"]
-            captured_request["body"] = kwargs["json"]
-            return httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": response_content}}]},
-            )
-
-    monkeypatch.setattr(analysis_module.httpx, "AsyncClient", MockAsyncClient)
-
-    client.post(
-        "/api/auth/register",
-        json={
-            "full_name": "Provider Test User",
-            "email": "provider@example.com",
-            "password": "password123",
-        },
-    )
+    pdf_content = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
     upload = client.post(
         "/api/medical/documents",
         data={"document_type": "laboratory_report"},
-        files={"file": ("report.pdf", io.BytesIO(b"%PDF-1.4\nreport\n%%EOF"), "application/pdf")},
+        files={"file": ("searchable.pdf", io.BytesIO(pdf_content), "application/pdf")},
     )
-
     assert upload.status_code == 201
-    assert upload.json()["status"] == "completed"
-    assert upload.json()["latest_analysis"]["summary"] == "Configured provider summary"
-    assert captured_request["url"] == "https://provider.example/v1/chat/completions"
-    assert captured_request["headers"]["Authorization"] == "Bearer test-provider-key"
-    assert captured_request["body"]["model"] == "configured-model"
+    doc_id = upload.json()["id"]
+
+    # Re-run analysis explicitly
+    with patch.object(
+        documents_module.extraction_service,
+        "extract_document",
+        return_value=MagicMock(status="success", text="Hemoglobin 14.0 g/dL"),
+    ):
+        analyze_resp = client.post(f"/api/medical/documents/{doc_id}/analyze")
+        assert analyze_resp.status_code == 200
+        assert analyze_resp.json()["status"] == "completed"
+        assert analyze_resp.json()["summary"] == "Valid PDF analysis"
+        assert gemini_call_count == 1
 
 
 @pytest.mark.anyio
-async def test_ai_analysis_reports_provider_key_rejection(
+async def test_gemini_failure_preserves_extraction_and_marks_failed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-    from pydantic import SecretStr
-
-    from app.core.config import get_settings
     from app.services.medical import analysis as analysis_module
     from app.services.medical import documents as documents_module
 
-    settings = get_settings().model_copy(update={"openai_api_key": SecretStr("invalid-test-key")})
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        documents_module.extraction_service,
-        "extract_text",
-        lambda *_: ("Example report text", [], 1),
-    )
-
-    class UnauthorizedAsyncClient:
-        def __init__(self, **_):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, *_args, **_kwargs):
-            return httpx.Response(
-                401,
-                json={"error": {"type": "invalid_api_key", "message": "Invalid API key"}},
-            )
-
-    monkeypatch.setattr(analysis_module.httpx, "AsyncClient", UnauthorizedAsyncClient)
-
     client.post(
         "/api/auth/register",
-        json={
-            "full_name": "Invalid Key User",
-            "email": "invalid-key@example.com",
-            "password": "password123",
-        },
+        json={"full_name": "Fail User", "email": "fail@example.com", "password": "password123"},
     )
+    settings = get_settings().model_copy(update={"gemini_api_key": SecretStr("test-gemini-key")})
+    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
+
+    async def mock_generate_fail(*args, **kwargs):
+        raise GeminiAdapterError("quota_exceeded", "Gemini quota is exhausted for this project/model. Check project limits and billing.")
+
+    monkeypatch.setattr(analysis_module.GeminiAdapter, "generate_content", mock_generate_fail)
+
+    pdf_content = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
     upload = client.post(
         "/api/medical/documents",
         data={"document_type": "laboratory_report"},
-        files={"file": ("report.pdf", io.BytesIO(b"%PDF-1.4\nreport\n%%EOF"), "application/pdf")},
+        files={"file": ("lab_fail.pdf", io.BytesIO(pdf_content), "application/pdf")},
     )
+    doc_id = upload.json()["id"]
 
-    assert upload.status_code == 201
-    assert upload.json()["status"] == "failed"
-    assert upload.json()["failure_code"] == "PROVIDER_AUTH_ERROR"
-    assert "provider at OPENAI_BASE_URL" in upload.json()["failure_message"]
-    assert "ChatGPT subscriptions are not API keys" in upload.json()["failure_message"]
+    with patch.object(
+        documents_module.extraction_service,
+        "extract_document",
+        return_value=MagicMock(status="success", text="Valid extracted medical text"),
+    ):
+        analyze_resp = client.post(f"/api/medical/documents/{doc_id}/analyze")
+        assert analyze_resp.status_code == 200
+        data = analyze_resp.json()
+        assert data["status"] == "failed"
+        assert data["error_code"] == "quota_exceeded"
+        assert "quota is exhausted" in data["error_message"].lower()
+
+        # Check detail endpoint preserves failure status
+        detail = client.get(f"/api/medical/documents/{doc_id}").json()
+        assert detail["status"] == "failed"
+        assert detail["failure_code"] == "quota_exceeded"
 
 
 @pytest.mark.anyio
-async def test_retry_analysis_persists_provider_quota_failure(
+async def test_concurrent_analysis_requests_prevent_duplicate_gemini_calls(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-    from pydantic import SecretStr
-
-    from app.core.config import get_settings
     from app.services.medical import analysis as analysis_module
     from app.services.medical import documents as documents_module
-
-    settings = get_settings().model_copy(update={"openai_api_key": SecretStr("quota-test-key")})
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        documents_module.extraction_service,
-        "extract_text",
-        lambda *_: ("Example report text", [], 1),
-    )
-    request_count = 0
-
-    class QuotaAsyncClient:
-        def __init__(self, **_):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, *_args, **_kwargs):
-            nonlocal request_count
-            request_count += 1
-            return httpx.Response(
-                429,
-                json={
-                    "error": {
-                        "type": "insufficient_quota",
-                        "code": "insufficient_quota",
-                        "message": "API quota is unavailable",
-                    }
-                },
-            )
-
-    monkeypatch.setattr(analysis_module.httpx, "AsyncClient", QuotaAsyncClient)
+    from app.services.medical.analysis import analysis_service
 
     client.post(
         "/api/auth/register",
-        json={
-            "full_name": "Quota Test User",
-            "email": "quota@example.com",
-            "password": "password123",
-        },
+        json={"full_name": "Conc User", "email": "conc@example.com", "password": "password123"},
     )
-    upload = client.post(
-        "/api/medical/documents",
-        data={"document_type": "laboratory_report"},
-        files={"file": ("report.pdf", io.BytesIO(b"%PDF-1.4\nreport\n%%EOF"), "application/pdf")},
-    )
-    document_id = upload.json()["id"]
-
-    assert upload.status_code == 201
-    assert upload.json()["status"] == "failed"
-    assert upload.json()["failure_code"] == "PROVIDER_INSUFFICIENT_QUOTA"
-    assert request_count == 1
-
-    retry = client.post(f"/api/medical/documents/{document_id}/analyze")
-    details = client.get(f"/api/medical/documents/{document_id}").json()
-
-    assert retry.status_code == 200
-    assert retry.json()["version"] == 2
-    assert retry.json()["status"] == "failed"
-    assert retry.json()["error_code"] == "PROVIDER_INSUFFICIENT_QUOTA"
-    assert details["status"] == "failed"
-    assert details["failure_code"] == "PROVIDER_INSUFFICIENT_QUOTA"
-    assert details["analyses"][0]["id"] == retry.json()["id"]
-    assert request_count == 2
-
-
-@pytest.mark.anyio
-async def test_image_upload_is_sent_as_vision_input(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import httpx
-    from pydantic import SecretStr
-
-    from app.core.config import get_settings
-    from app.services.medical import analysis as analysis_module
-    from app.services.medical import documents as documents_module
-
-    settings = get_settings().model_copy(update={"openai_api_key": SecretStr("image-test-key")})
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        documents_module.extraction_service,
-        "extract_text",
-        lambda *_: ("", [], 1),
-    )
-    captured_content: list[dict[str, Any]] = []
-
-    class VisionAsyncClient:
-        def __init__(self, **_):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, *_args, **kwargs):
-            captured_content.extend(kwargs["json"]["messages"][1]["content"])
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {"summary": "Image report analyzed", "key_points": []}
-                                )
-                            }
-                        }
-                    ]
-                },
-            )
-
-    monkeypatch.setattr(analysis_module.httpx, "AsyncClient", VisionAsyncClient)
-    client.post(
-        "/api/auth/register",
-        json={
-            "full_name": "Image Test User",
-            "email": "image@example.com",
-            "password": "password123",
-        },
-    )
-    upload = client.post(
-        "/api/medical/documents",
-        data={"document_type": "laboratory_report"},
-        files={"file": ("report.png", io.BytesIO(b"\x89PNG\r\n\x1a\nimage"), "image/png")},
-    )
-
-    assert upload.status_code == 201
-    assert upload.json()["status"] == "completed"
-    assert upload.json()["latest_analysis"]["summary"] == "Image report analyzed"
-    assert captured_content[0]["type"] == "text"
-    assert captured_content[1]["type"] == "image_url"
-    assert captured_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-
-
-@pytest.mark.anyio
-async def test_concurrent_analysis_requests_share_in_flight_analysis(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import asyncio
-    import httpx
-    from pydantic import SecretStr
-    from uuid import UUID
-
-    from app.core.config import get_settings
-    from app.services.medical import analysis as analysis_module
-    from app.services.medical import documents as documents_module
-
-    settings = get_settings().model_copy(update={"openai_api_key": None})
-    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        documents_module.extraction_service,
-        "extract_text",
-        lambda *_: ("Example report text", [], 1),
-    )
-    client.post(
-        "/api/auth/register",
-        json={
-            "full_name": "Duplicate Test User",
-            "email": "duplicate@example.com",
-            "password": "password123",
-        },
-    )
-    upload = client.post(
-        "/api/medical/documents",
-        data={"document_type": "laboratory_report"},
-        files={"file": ("report.pdf", io.BytesIO(b"%PDF-1.4\nreport\n%%EOF"), "application/pdf")},
-    )
-    assert upload.status_code == 201
-    document_id = UUID(upload.json()["id"])
     user_id = UUID(client.get("/api/users/me").json()["id"])
+    settings = get_settings().model_copy(update={"gemini_api_key": SecretStr("test-gemini-key")})
+    monkeypatch.setattr(analysis_module, "get_settings", lambda: settings)
 
-    settings = settings.model_copy(update={"openai_api_key": SecretStr("duplicate-test-key")})
+    upload = client.post(
+        "/api/medical/documents",
+        data={"document_type": "laboratory_report"},
+        files={"file": ("report.pdf", io.BytesIO(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"), "application/pdf")},
+    )
+    document_id = UUID(upload.json()["id"])
+
     request_started = asyncio.Event()
     release_request = asyncio.Event()
-    request_count = 0
-    response_content = json.dumps({"summary": "Single provider call", "key_points": []})
+    gemini_call_count = 0
 
-    class BlockingAsyncClient:
-        def __init__(self, **_):
-            pass
+    async def mock_blocking_gemini(*args, **kwargs):
+        nonlocal gemini_call_count
+        gemini_call_count += 1
+        request_started.set()
+        await release_request.wait()
+        return {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "content": json.dumps({"summary": "Single call summary", "key_points": []}),
+            "request_id": "test-req-id",
+            "usage": {"input_tokens": 50, "output_tokens": 10},
+        }
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, *_args, **_kwargs):
-            nonlocal request_count
-            request_count += 1
-            request_started.set()
-            await release_request.wait()
-            return httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": response_content}}]},
-            )
-
-    monkeypatch.setattr(analysis_module.httpx, "AsyncClient", BlockingAsyncClient)
-    from app.services.medical.analysis import analysis_service
+    monkeypatch.setattr(analysis_module.GeminiAdapter, "generate_content", mock_blocking_gemini)
 
     first_session = TestSession()
     second_session = TestSession()
+
     first_task = asyncio.create_task(
         analysis_service.run_analysis(
             db=first_session,
             document_id=document_id,
             user_id=user_id,
-            extracted_text="Example report text",
+            extracted_text="Medical test text",
             document_type="laboratory_report",
         )
     )
+
     try:
         await asyncio.wait_for(request_started.wait(), timeout=5)
+        # Attempt second concurrent analysis while first is active
         duplicate = await analysis_service.run_analysis(
             db=second_session,
             document_id=document_id,
             user_id=user_id,
-            extracted_text="Example report text",
+            extracted_text="Medical test text",
             document_type="laboratory_report",
         )
         assert duplicate.status == "processing"
-        assert request_count == 1
+        assert gemini_call_count == 1
     finally:
         release_request.set()
         completed = await first_task
@@ -745,4 +700,4 @@ async def test_concurrent_analysis_requests_share_in_flight_analysis(
         second_session.close()
 
     assert completed.status == "completed"
-    assert request_count == 1
+    assert gemini_call_count == 1

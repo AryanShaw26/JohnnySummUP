@@ -6,9 +6,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-import httpx
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -17,25 +16,9 @@ from app.models.document_analysis import DocumentAnalysis
 from app.models.extracted_finding import ExtractedFinding
 from app.models.medical_document import MedicalDocument
 from app.models.medical_measurement import MedicalMeasurement
+from app.services.medical.gemini_adapter import ERROR_MESSAGES, GeminiAdapter, GeminiAdapterError
 
 logger = logging.getLogger("johnnysummup.medical.analysis")
-
-QUOTA_ERROR_MARKERS = (
-    "insufficient_quota",
-    "billing_hard_limit",
-    "billing_not_active",
-    "quota",
-    "credit",
-)
-
-
-def _is_quota_error(error_type: str, error_code: str, error_message: str) -> bool:
-    return any(
-        marker in value
-        for value in (error_type, error_code, error_message)
-        for marker in QUOTA_ERROR_MARKERS
-    )
-
 
 SYSTEM_PROMPT = """You are a medical document analyzer for JohnnySummUP.
 Analyze the provided medical report text and extract structured information strictly according to what is present in the document.
@@ -142,185 +125,36 @@ class MedicalAnalysisService:
     def resolve_provider(requested_provider: str | None = None) -> tuple[str, str, str | None]:
         """
         Resolves the provider to use, model name, and API key.
+        Always resolves to Gemini in JohnnySummUP.
         Returns: (provider_name, model_name, api_key_or_none)
         """
         settings = get_settings()
-        openai_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
         gemini_key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else None
-
-        req = (requested_provider or "").strip().lower()
-
-        if req == "gemini":
-            return "gemini", settings.gemini_model, gemini_key
-        elif req == "openai":
-            return "openai", settings.openai_model, openai_key
-        else:
-            # Default fallback based on configured keys
-            if settings.default_ai_provider == "gemini" and gemini_key:
-                return "gemini", settings.gemini_model, gemini_key
-            if openai_key:
-                return "openai", settings.openai_model, openai_key
-            if gemini_key:
-                return "gemini", settings.gemini_model, gemini_key
-            # Neither configured, default to settings preference
-            chosen = settings.default_ai_provider
-            chosen_model = settings.gemini_model if chosen == "gemini" else settings.openai_model
-            return chosen, chosen_model, None
+        return "gemini", settings.gemini_model, gemini_key
 
     @staticmethod
     def get_provider_diagnostics() -> dict[str, Any]:
         """Returns provider availability and configuration metadata without exposing secret keys."""
         settings = get_settings()
+        try:
+            import importlib.metadata
+            sdk_version = importlib.metadata.version("google-genai")
+        except Exception:
+            sdk_version = "3.0.0"
+
+        has_key = bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value())
         return {
-            "openai": {
-                "configured": bool(settings.openai_api_key and settings.openai_api_key.get_secret_value()),
-                "model": settings.openai_model,
-            },
-            "gemini": {
-                "configured": bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value()),
-                "model": settings.gemini_model,
-            },
-            "default_provider": settings.default_ai_provider,
+            "provider": "gemini",
+            "configured": has_key,
+            "model": settings.gemini_model,
+            "sdk_version": sdk_version,
+            "configuration_source": "GEMINI_API_KEY",
         }
 
     @classmethod
-    async def test_provider_connectivity(cls, provider: str) -> dict[str, Any]:
-        """Runs a minimal non-medical connectivity check against the requested provider."""
-        settings = get_settings()
-        request_id = str(uuid4())
-        start_time = time.time()
-
-        prov, model_name, api_key = cls.resolve_provider(provider)
-        if not api_key:
-            return {
-                "success": False,
-                "provider": prov,
-                "model": model_name,
-                "request_id": request_id,
-                "error_code": "authentication_failed",
-                "error_message": f"AI provider '{prov}' is not configured with an API key.",
-                "duration_ms": int((time.time() - start_time) * 1000),
-            }
-
-        try:
-            if prov == "gemini":
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}",
-                        headers={"Content-Type": "application/json"},
-                        json={
-                            "contents": [{"parts": [{"text": "Return JSON: {\"status\": \"ok\"}"}]}],
-                            "generationConfig": {"responseMimeType": "application/json"},
-                        },
-                    )
-            else:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model_name,
-                            "messages": [{"role": "user", "content": "Return JSON: {\"status\": \"ok\"}"}],
-                            "response_format": {"type": "json_object"},
-                            "temperature": 0.0,
-                        },
-                    )
-
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            if resp.status_code == 200:
-                return {
-                    "success": True,
-                    "provider": prov,
-                    "model": model_name,
-                    "request_id": request_id,
-                    "duration_ms": duration_ms,
-                }
-
-            error_code, error_msg = cls._classify_http_error(prov, resp.status_code, resp.text, request_id)
-            return {
-                "success": False,
-                "provider": prov,
-                "model": model_name,
-                "request_id": request_id,
-                "error_code": error_code,
-                "error_message": error_msg,
-                "duration_ms": duration_ms,
-            }
-        except Exception as exc:
-            duration_ms = int((time.time() - start_time) * 1000)
-            error_code, error_msg = cls._classify_exception(exc, request_id)
-            return {
-                "success": False,
-                "provider": prov,
-                "model": model_name,
-                "request_id": request_id,
-                "error_code": error_code,
-                "error_message": error_msg,
-                "duration_ms": duration_ms,
-            }
-
-    @staticmethod
-    def _classify_http_error(provider: str, status_code: int, response_text: str, request_id: str) -> tuple[str, str]:
-        """Classifies HTTP errors into standardized error codes and safe messages (Section 5.3)."""
-        body_str = response_text.lower()
-
-        if status_code == 429:
-            # Distinguish actual exhausted billing quota from transient rate limits
-            if any(term in body_str for term in ["insufficient_quota", "quota_exceeded", "resource_exhausted", "quota", "credit"]):
-                return (
-                    "quota_exceeded",
-                    "The selected AI provider has exhausted its available quota. Check the provider project, billing and limits.",
-                )
-            return (
-                "rate_limited",
-                "The AI provider is temporarily rate-limiting requests. Please retry shortly.",
-            )
-        elif status_code in (401, 403):
-            if "api_key_invalid" in body_str or "unauthorized" in body_str or "invalid" in body_str:
-                return (
-                    "authentication_failed",
-                    "AI provider authentication failed. Check the configured API key.",
-                )
-            if "quota" in body_str or "resource_exhausted" in body_str:
-                return (
-                    "quota_exceeded",
-                    "The selected AI provider has exhausted its available quota. Check the provider project, billing and limits.",
-                )
-            return (
-                "authentication_failed",
-                "AI provider authentication failed. Check the configured API key.",
-            )
-        elif status_code == 404:
-            return (
-                "model_unavailable",
-                "The configured AI model is unavailable for this provider account.",
-            )
-        elif status_code >= 500:
-            return (
-                "provider_unavailable",
-                "Could not connect to the AI provider. Please retry.",
-            )
-        else:
-            return (
-                "provider_error",
-                f"AI analysis failed. Reference: {request_id}",
-            )
-
-    @staticmethod
-    def _classify_exception(exc: Exception, request_id: str) -> tuple[str, str]:
-        """Classifies runtime and network exceptions."""
-        if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
-            return "provider_timeout", "AI analysis timed out. Please retry."
-        elif isinstance(exc, httpx.RequestError):
-            return "provider_unavailable", "Could not connect to the AI provider. Please retry."
-        elif isinstance(exc, (json.JSONDecodeError, ValidationError)):
-            return "invalid_provider_response", "The AI provider returned an unusable response."
-        else:
-            return "provider_error", f"AI analysis failed. Reference: {request_id}"
+    async def test_provider_connectivity(cls, provider: str | None = None) -> dict[str, Any]:
+        """Runs a minimal non-medical ping check against Gemini."""
+        return await GeminiAdapter.test_connectivity()
 
     @classmethod
     async def run_analysis(
@@ -335,12 +169,14 @@ class MedicalAnalysisService:
         image_data_url: str | None = None,
     ) -> DocumentAnalysis:
         request_id = str(uuid4())
+        settings = get_settings()
 
         # Find document
         doc = db.get(MedicalDocument, document_id)
         if not doc or doc.user_id != user_id:
             raise ValueError("Document not found or ownership mismatch")
 
+        # Atomic claim to prevent duplicate analysis runs on the same document
         claim = db.execute(
             update(MedicalDocument)
             .where(
@@ -369,33 +205,21 @@ class MedicalAnalysisService:
 
         latest_version = db.scalar(
             select(func.max(DocumentAnalysis.version)).where(
-                DocumentAnalysis.document_id == document_id
+                DocumentAnalysis.document_id == document_id,
+                DocumentAnalysis.user_id == user_id,
             )
         )
         next_version = (latest_version or 0) + 1
-
-        provider_name, model_name, api_key = cls.resolve_provider(requested_provider)
 
         analysis = DocumentAnalysis(
             document_id=doc.id,
             user_id=user_id,
             version=next_version,
             status="processing",
-<<<<<<< HEAD
-            extracted_text=extracted_text[:10000] if extracted_text else None,
-            provider="mock" if mock_response is not None else ("openai" if settings.openai_api_key else None),
-            model_name=(
-                "mock"
-                if mock_response is not None
-                else (settings.openai_model if settings.openai_api_key else None)
-            ),
-            prompt_version="v1.0",
-=======
             extracted_text=extracted_text[:12000] if extracted_text else None,
-            provider="mock" if mock_response is not None else provider_name,
-            model_name="mock" if mock_response is not None else model_name,
-            prompt_version="v1.1",
->>>>>>> aryan
+            provider="mock" if mock_response is not None else "gemini",
+            model_name="mock" if mock_response is not None else settings.gemini_model,
+            prompt_version="v2.0",
             started_at=datetime.now(timezone.utc),
         )
         db.add(analysis)
@@ -411,27 +235,16 @@ class MedicalAnalysisService:
             doc.id,
             analysis.id,
             analysis.version,
-            provider_name,
-            model_name,
+            analysis.provider,
+            analysis.model_name,
         )
 
-        # Check if text is present
-<<<<<<< HEAD
-        if not extracted_text.strip() and image_data_url is None:
-            logger.warning("extraction_failed_no_text document_id=%s", doc.id)
-=======
+        # 1. Check if usable text is present (Extraction check)
         if not extracted_text or not extracted_text.strip():
             logger.warning("extraction_failed_no_text request_id=%s document_id=%s", request_id, doc.id)
->>>>>>> aryan
-            analysis.status = "failed"
-            analysis.error_code = "extraction_empty"
-            analysis.error_message = "No readable text was extracted. Try a clearer scan or another file."
-            analysis.completed_at = datetime.now(timezone.utc)
-            doc.status = "failed"
-            doc.failure_code = analysis.error_code
-            doc.failure_message = analysis.error_message
-            db.commit()
-            return analysis
+            return cls._mark_analysis_failed(
+                db, doc, analysis, "extraction_failed", ERROR_MESSAGES["extraction_failed"]
+            )
 
         # If mock_response is provided for testing, use it directly
         if mock_response is not None:
@@ -443,14 +256,12 @@ class MedicalAnalysisService:
                 parsed_data=mock_response,
             )
 
-        # Check if API key is configured for selected provider
-        if not api_key:
-            logger.info("provider_not_configured request_id=%s provider=%s", request_id, provider_name)
+        # 2. Check if Gemini key is configured
+        if not settings.gemini_api_key or not settings.gemini_api_key.get_secret_value():
+            logger.info("provider_not_configured request_id=%s", request_id)
             analysis.status = "unavailable"
-            analysis.error_code = "AI_NOT_CONFIGURED"
-            analysis.error_message = (
-                f"AI analysis with {provider_name.upper()} is not configured on this server. Document is safely stored."
-            )
+            analysis.error_code = "provider_not_configured"
+            analysis.error_message = ERROR_MESSAGES["provider_not_configured"]
             analysis.completed_at = datetime.now(timezone.utc)
             doc.status = "analysis_unavailable"
             doc.failure_code = analysis.error_code
@@ -458,53 +269,7 @@ class MedicalAnalysisService:
             db.commit()
             return analysis
 
-<<<<<<< HEAD
-        # Call OpenAI Chat Completion
-        document_content = (
-            extracted_text[:8000]
-            if extracted_text.strip()
-            else "No text layer was extracted; analyze the attached image."
-        )
-        user_prompt = (
-            f"Document Type: {document_type}\nFilename: {doc.original_filename}\n\n"
-            f"Document Text:\n{document_content}"
-        )
-        user_content: str | list[dict[str, Any]] = user_prompt
-        if image_data_url is not None:
-            user_content = [
-                {"type": "text", "text": user_prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_data_url, "detail": "high"},
-                },
-            ]
-
-        logger.info(
-            "provider_request_started document_id=%s provider=openai model=%s",
-            doc.id,
-            settings.openai_model,
-        )
-
-        try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                response = await client.post(
-                    f"{settings.openai_base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": settings.openai_model,
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_content},
-                        ],
-                        "temperature": 0.1,
-                    },
-                )
-=======
-        # Bound extracted text to avoid prompt exhaustion and wrap in untrusted data delimiters
+        # 3. Bound extracted text and delimit as untrusted data
         safe_text = extracted_text[:10000]
         user_prompt = (
             f"Document Type: {document_type}\n"
@@ -512,141 +277,14 @@ class MedicalAnalysisService:
             f"<DOCUMENT_CONTENT>\n{safe_text}\n</DOCUMENT_CONTENT>"
         )
 
-        logger.info(
-            "provider_request_started request_id=%s document_id=%s provider=%s model=%s",
-            request_id,
-            doc.id,
-            provider_name,
-            model_name,
-        )
-
         try:
-            raw_content = ""
-            if provider_name == "gemini":
-                # Google Gemini API Call
-                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                async with httpx.AsyncClient(timeout=45.0) as client:
-                    response = await client.post(
-                        gemini_url,
-                        headers={"Content-Type": "application/json"},
-                        json={
-                            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                            "contents": [{"parts": [{"text": user_prompt}]}],
-                            "generationConfig": {
-                                "temperature": 0.1,
-                                "responseMimeType": "application/json",
-                            },
-                        },
-                    )
-                if response.status_code != 200:
-                    err_code, err_msg = cls._classify_http_error("gemini", response.status_code, response.text, request_id)
-                    logger.error("gemini_request_failed request_id=%s status=%d code=%s", request_id, response.status_code, err_code)
-                    return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
->>>>>>> aryan
-
-                gemini_resp = response.json()
-                try:
-<<<<<<< HEAD
-                    response_data = response.json()
-                    if isinstance(response_data, dict) and isinstance(response_data.get("error"), dict):
-                        error_body = response_data["error"]
-                except (ValueError, TypeError):
-                    pass
-
-                error_type = str(error_body.get("type", "")).lower()
-                error_msg = str(error_body.get("message", "")).lower()
-                provider_error_code = str(error_body.get("code", "")).lower()
-                status_code = response.status_code
-
-                logger.error(
-                    "provider_request_failed document_id=%s status_code=%d error_type=%s provider_error_code=%s",
-                    doc.id,
-                    status_code,
-                    error_type,
-                    provider_error_code,
-                )
-
-                if status_code == 429:
-                    if _is_quota_error(error_type, provider_error_code, error_msg):
-                        analysis.error_code = "PROVIDER_INSUFFICIENT_QUOTA"
-                        analysis.error_message = (
-                            "The AI provider rejected this request because its API quota or billing "
-                            "limit is unavailable. Rejected requests may not appear in usage history. "
-                            "Check billing, project spending limits, and that this API key belongs "
-                            "to the intended project."
-                        )
-                    else:
-                        analysis.error_code = "PROVIDER_RATE_LIMIT"
-                        analysis.error_message = (
-                            "Analysis rate limit exceeded. Please wait a moment and retry."
-                        )
-                elif status_code == 401:
-                    analysis.error_code = "PROVIDER_AUTH_ERROR"
-                    analysis.error_message = (
-                        "The AI provider rejected OPENAI_API_KEY. Set it to an active API key issued "
-                        "by the provider at OPENAI_BASE_URL, then restart the backend. The default "
-                        "URL uses OpenAI API keys; ChatGPT subscriptions are not API keys."
-                    )
-                elif status_code == 404:
-                    analysis.error_code = "MODEL_NOT_FOUND"
-                    analysis.error_message = (
-                        f"AI model '{settings.openai_model}' was not found. "
-                        "Check OPENAI_MODEL and OPENAI_BASE_URL."
-                    )
-                elif status_code == 403:
-                    analysis.error_code = "PROVIDER_PERMISSION_ERROR"
-                    analysis.error_message = (
-                        "The AI provider rejected this API key. Check that the key has permission "
-                        "to use the configured model."
-                    )
-                elif status_code == 400:
-                    analysis.error_code = "PROVIDER_INVALID_REQUEST"
-                    analysis.error_message = (
-                        "The AI provider rejected the request. Check the configured model and "
-                        "provider compatibility."
-                    )
-                elif status_code >= 500:
-                    analysis.error_code = "PROVIDER_SERVER_ERROR"
-                    analysis.error_message = (
-                        "AI analysis provider encountered a temporary server error. Please try again later."
-=======
-                    raw_content = gemini_resp["candidates"][0]["content"]["parts"][0]["text"]
-                except (KeyError, IndexError):
-                    return cls._mark_analysis_failed(
-                        db, doc, analysis, "invalid_provider_response", "The AI provider returned an unusable response."
-                    )
-            else:
-                # OpenAI Chat Completion Call
-                async with httpx.AsyncClient(timeout=45.0) as client:
-                    response = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model_name,
-                            "response_format": {"type": "json_object"},
-                            "messages": [
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            "temperature": 0.1,
-                        },
->>>>>>> aryan
-                    )
-                if response.status_code != 200:
-                    err_code, err_msg = cls._classify_http_error("openai", response.status_code, response.text, request_id)
-                    logger.error("openai_request_failed request_id=%s status=%d code=%s", request_id, response.status_code, err_code)
-                    return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
-
-                openai_resp = response.json()
-                try:
-                    raw_content = openai_resp["choices"][0]["message"]["content"] or ""
-                except (KeyError, IndexError):
-                    return cls._mark_analysis_failed(
-                        db, doc, analysis, "invalid_provider_response", "The AI provider returned an unusable response."
-                    )
+            # 4. Invoke Gemini via GeminiAdapter
+            gemini_result = await GeminiAdapter.generate_content(
+                prompt=user_prompt,
+                system_instruction=SYSTEM_PROMPT,
+                timeout_seconds=45.0,
+            )
+            raw_content = gemini_result["content"]
 
             # Strip markdown fences if present
             clean_content = raw_content.strip()
@@ -658,8 +296,18 @@ class MedicalAnalysisService:
                 clean_content = clean_content[:-3]
             clean_content = clean_content.strip()
 
-            parsed_raw = json.loads(clean_content)
-            validated = RawAnalysisOutput.model_validate(parsed_raw)
+            try:
+                parsed_raw = json.loads(clean_content)
+                validated = RawAnalysisOutput.model_validate(parsed_raw)
+            except (json.JSONDecodeError, ValidationError) as parse_exc:
+                logger.error("invalid_provider_response request_id=%s parse_exc=%s", request_id, parse_exc)
+                return cls._mark_analysis_failed(
+                    db,
+                    doc,
+                    analysis,
+                    "invalid_provider_response",
+                    ERROR_MESSAGES["invalid_provider_response"],
+                )
 
             logger.info("provider_request_succeeded request_id=%s document_id=%s", request_id, doc.id)
 
@@ -671,10 +319,14 @@ class MedicalAnalysisService:
                 parsed_data=validated.model_dump(),
             )
 
+        except GeminiAdapterError as g_err:
+            logger.error("gemini_adapter_error request_id=%s code=%s msg=%s", request_id, g_err.error_code, g_err.user_message)
+            return cls._mark_analysis_failed(db, doc, analysis, g_err.error_code, g_err.user_message)
         except Exception as exc:
-            err_code, err_msg = cls._classify_exception(exc, request_id)
-            logger.error("analysis_exception request_id=%s error=%s code=%s", request_id, exc, err_code)
-            return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
+            logger.error("unexpected_analysis_error request_id=%s: %s", request_id, exc)
+            return cls._mark_analysis_failed(
+                db, doc, analysis, "provider_error", ERROR_MESSAGES["provider_error"].format(request_id=request_id)
+            )
 
     @staticmethod
     def _mark_analysis_failed(
@@ -696,148 +348,165 @@ class MedicalAnalysisService:
         db.commit()
         return analysis
 
-    @staticmethod
+    @classmethod
     def _persist_analysis_output(
+        cls,
         db: Session,
         doc: MedicalDocument,
         analysis: DocumentAnalysis,
         user_id: UUID,
         parsed_data: dict[str, Any],
     ) -> DocumentAnalysis:
-        # Persist summary
-        analysis.summary = parsed_data.get("summary")
-        analysis.key_points = parsed_data.get("key_points", [])
-        analysis.status = "completed"
-        analysis.error_code = None
-        analysis.error_message = None
-        analysis.completed_at = datetime.now(timezone.utc)
+        try:
+            # Clean any existing child records for this document to prevent duplicate items upon re-analysis
+            db.execute(delete(AbnormalityFlag).where(AbnormalityFlag.document_id == doc.id))
+            db.execute(delete(MedicalMeasurement).where(MedicalMeasurement.document_id == doc.id))
+            db.execute(delete(ExtractedFinding).where(ExtractedFinding.analysis_id == analysis.id))
 
-        # Update document report date if parsed and not previously set
-        report_date_str = parsed_data.get("report_date")
-        if report_date_str:
-            try:
-                parsed_report_date = datetime.strptime(str(report_date_str), "%Y-%m-%d").date()
-                if not doc.report_date:
-                    doc.report_date = parsed_report_date
-            except ValueError:
-                pass
+            # Persist summary
+            analysis.summary = parsed_data.get("summary")
+            analysis.key_points = parsed_data.get("key_points", [])
+            analysis.status = "completed"
+            analysis.error_code = None
+            analysis.error_message = None
+            analysis.completed_at = datetime.now(timezone.utc)
 
-        doc_date = doc.report_date or date.today()
+            # Update document report date if parsed and not previously set
+            report_date_str = parsed_data.get("report_date")
+            if report_date_str:
+                try:
+                    parsed_report_date = datetime.strptime(str(report_date_str), "%Y-%m-%d").date()
+                    if not doc.report_date:
+                        doc.report_date = parsed_report_date
+                except ValueError:
+                    pass
 
-        # Clean any stale child findings/measurements/flags for this analysis to prevent duplication
-        # Persist findings
-        findings_data = parsed_data.get("findings", [])
-        finding_objects: list[ExtractedFinding] = []
-        for item in findings_data:
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-            num_val = item.get("numeric_value")
-            ref_low = item.get("reference_low")
-            ref_high = item.get("reference_high")
-            conf = item.get("confidence")
+            doc_date = doc.report_date or date.today()
 
-            finding = ExtractedFinding(
-                analysis_id=analysis.id,
-                document_id=doc.id,
-                user_id=user_id,
-                category=str(item.get("category", "general"))[:40],
-                finding_type=str(item.get("finding_type", "test_result"))[:80],
-                name=name[:255],
-                value_text=str(item.get("value_text", ""))[:500] if item.get("value_text") else None,
-                numeric_value=Decimal(str(num_val)) if num_val is not None else None,
-                unit=str(item.get("unit", ""))[:60] if item.get("unit") else None,
-                reference_low=Decimal(str(ref_low)) if ref_low is not None else None,
-                reference_high=Decimal(str(ref_high)) if ref_high is not None else None,
-                reference_text=str(item.get("reference_text", ""))[:255] if item.get("reference_text") else None,
-                source_page=item.get("source_page", 1),
-                confidence=Decimal(str(conf)) if conf is not None else None,
-                is_extracted=True,
+            # Persist findings
+            findings_data = parsed_data.get("findings", [])
+            finding_objects: list[ExtractedFinding] = []
+            for item in findings_data:
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                num_val = item.get("numeric_value")
+                ref_low = item.get("reference_low")
+                ref_high = item.get("reference_high")
+                conf = item.get("confidence")
+
+                finding = ExtractedFinding(
+                    analysis_id=analysis.id,
+                    document_id=doc.id,
+                    user_id=user_id,
+                    category=str(item.get("category", "general"))[:40],
+                    finding_type=str(item.get("finding_type", "test_result"))[:80],
+                    name=name[:255],
+                    value_text=str(item.get("value_text", ""))[:500] if item.get("value_text") else None,
+                    numeric_value=Decimal(str(num_val)) if num_val is not None else None,
+                    unit=str(item.get("unit", ""))[:60] if item.get("unit") else None,
+                    reference_low=Decimal(str(ref_low)) if ref_low is not None else None,
+                    reference_high=Decimal(str(ref_high)) if ref_high is not None else None,
+                    reference_text=str(item.get("reference_text", ""))[:255] if item.get("reference_text") else None,
+                    source_page=item.get("source_page", 1),
+                    confidence=Decimal(str(conf)) if conf is not None else None,
+                    is_extracted=True,
+                )
+                db.add(finding)
+                finding_objects.append(finding)
+
+            db.flush()
+
+            finding_by_name = {f.name.lower(): f.id for f in finding_objects}
+
+            # Persist measurements
+            measurements_data = parsed_data.get("measurements", [])
+            measurement_objects: list[MedicalMeasurement] = []
+            for m in measurements_data:
+                param_name = str(m.get("parameter_name", "")).strip()
+                num_val = m.get("numeric_value")
+                unit = str(m.get("unit", "")).strip()
+                if not param_name or num_val is None or not unit:
+                    continue
+
+                ref_low = m.get("reference_low")
+                ref_high = m.get("reference_high")
+
+                meas = MedicalMeasurement(
+                    user_id=user_id,
+                    document_id=doc.id,
+                    source_finding_id=finding_by_name.get(param_name.lower()),
+                    parameter_name=param_name[:160],
+                    parameter_code=str(m.get("parameter_code", param_name.lower().replace(" ", "_")))[:100],
+                    numeric_value=Decimal(str(num_val)),
+                    unit=unit[:60],
+                    report_date=doc_date,
+                    reference_low=Decimal(str(ref_low)) if ref_low is not None else None,
+                    reference_high=Decimal(str(ref_high)) if ref_high is not None else None,
+                    reference_text=str(m.get("reference_text", ""))[:255] if m.get("reference_text") else None,
+                )
+                db.add(meas)
+                measurement_objects.append(meas)
+
+            db.flush()
+
+            meas_by_name = {m.parameter_name.lower(): m.id for m in measurement_objects}
+
+            # Persist abnormality flags
+            flags_data = parsed_data.get("flags", [])
+            for flag in flags_data:
+                param_name = str(flag.get("parameter_name", "")).strip()
+                if not param_name:
+                    continue
+                obs_val = flag.get("observed_value")
+                ref_text = flag.get("reference_text")
+                flag_type = str(flag.get("flag_type", "needs_review"))[:30]
+                severity = str(flag.get("severity", "review"))[:20]
+
+                if severity not in ["info", "review", "high"]:
+                    severity = "review"
+
+                flag_obj = AbnormalityFlag(
+                    user_id=user_id,
+                    document_id=doc.id,
+                    source_finding_id=finding_by_name.get(param_name.lower()),
+                    measurement_id=meas_by_name.get(param_name.lower()),
+                    parameter_name=param_name[:160],
+                    observed_value=Decimal(str(obs_val)) if obs_val is not None else None,
+                    unit=str(flag.get("unit", ""))[:60] if flag.get("unit") else None,
+                    reference_text=str(ref_text)[:255] if ref_text else None,
+                    flag_type=flag_type,
+                    severity=severity,
+                    explanation=str(flag.get("explanation", ""))[:1000] if flag.get("explanation") else None,
+                )
+                db.add(flag_obj)
+
+            doc.status = "completed"
+            doc.failure_code = None
+            doc.failure_message = None
+            db.commit()
+            db.refresh(analysis)
+
+            logger.info(
+                "analysis_persisted document_id=%s findings_count=%d measurements_count=%d flags_count=%d",
+                doc.id,
+                len(finding_objects),
+                len(measurement_objects),
+                len(flags_data),
             )
-            db.add(finding)
-            finding_objects.append(finding)
 
-        db.flush()
+            return analysis
 
-        finding_by_name = {f.name.lower(): f.id for f in finding_objects}
-
-        # Persist measurements
-        measurements_data = parsed_data.get("measurements", [])
-        measurement_objects: list[MedicalMeasurement] = []
-        for m in measurements_data:
-            param_name = str(m.get("parameter_name", "")).strip()
-            num_val = m.get("numeric_value")
-            unit = str(m.get("unit", "")).strip()
-            if not param_name or num_val is None or not unit:
-                continue
-
-            ref_low = m.get("reference_low")
-            ref_high = m.get("reference_high")
-
-            meas = MedicalMeasurement(
-                user_id=user_id,
-                document_id=doc.id,
-                source_finding_id=finding_by_name.get(param_name.lower()),
-                parameter_name=param_name[:160],
-                parameter_code=str(m.get("parameter_code", param_name.lower().replace(" ", "_")))[:100],
-                numeric_value=Decimal(str(num_val)),
-                unit=unit[:60],
-                report_date=doc_date,
-                reference_low=Decimal(str(ref_low)) if ref_low is not None else None,
-                reference_high=Decimal(str(ref_high)) if ref_high is not None else None,
-                reference_text=str(m.get("reference_text", ""))[:255] if m.get("reference_text") else None,
+        except Exception as exc:
+            db.rollback()
+            logger.error("persistence_failed document_id=%s analysis_id=%s: %s", doc.id, analysis.id, exc)
+            return cls._mark_analysis_failed(
+                db,
+                doc,
+                analysis,
+                "persistence_failed",
+                ERROR_MESSAGES["persistence_failed"],
             )
-            db.add(meas)
-            measurement_objects.append(meas)
-
-        db.flush()
-
-        meas_by_name = {m.parameter_name.lower(): m.id for m in measurement_objects}
-
-        # Persist abnormality flags
-        flags_data = parsed_data.get("flags", [])
-        for flag in flags_data:
-            param_name = str(flag.get("parameter_name", "")).strip()
-            if not param_name:
-                continue
-            obs_val = flag.get("observed_value")
-            ref_text = flag.get("reference_text")
-            flag_type = str(flag.get("flag_type", "needs_review"))[:30]
-            severity = str(flag.get("severity", "review"))[:20]
-
-            if severity not in ["info", "review", "high"]:
-                severity = "review"
-
-            flag_obj = AbnormalityFlag(
-                user_id=user_id,
-                document_id=doc.id,
-                source_finding_id=finding_by_name.get(param_name.lower()),
-                measurement_id=meas_by_name.get(param_name.lower()),
-                parameter_name=param_name[:160],
-                observed_value=Decimal(str(obs_val)) if obs_val is not None else None,
-                unit=str(flag.get("unit", ""))[:60] if flag.get("unit") else None,
-                reference_text=str(ref_text)[:255] if ref_text else None,
-                flag_type=flag_type,
-                severity=severity,
-                explanation=str(flag.get("explanation", ""))[:1000] if flag.get("explanation") else None,
-            )
-            db.add(flag_obj)
-
-        doc.status = "completed"
-        doc.failure_code = None
-        doc.failure_message = None
-        db.commit()
-        db.refresh(analysis)
-
-        logger.info(
-            "analysis_persisted document_id=%s findings_count=%d measurements_count=%d flags_count=%d",
-            doc.id,
-            len(finding_objects),
-            len(measurement_objects),
-            len(flags_data),
-        )
-
-        return analysis
 
 
 analysis_service = MedicalAnalysisService()

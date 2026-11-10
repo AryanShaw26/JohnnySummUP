@@ -15,4 +15,5 @@ pypdf>=5.0.0
 pymupdf>=2.1
 pillow>=10.0
 pytesseract>=0.3.10
+google-genai>=3.0.0,<4.0
 

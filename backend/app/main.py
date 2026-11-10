@@ -17,8 +17,10 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     with get_engine().connect() as connection:
         connection.execute(text("SELECT 1"))
-    if settings.openai_api_key is None:
-        logger.info("Optional future-phase OpenAI integration is not configured")
+    if settings.gemini_api_key is None:
+        logger.info("Gemini AI integration is not configured")
+    else:
+        logger.info("Gemini AI integration configured with model=%s", settings.gemini_model)
     yield
 
 
