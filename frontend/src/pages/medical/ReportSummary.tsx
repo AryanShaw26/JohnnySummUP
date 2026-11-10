@@ -29,6 +29,7 @@ export function ReportSummaryPage() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const pollingRef = useRef<number | null>(null);
+  const reanalyzeInFlightRef = useRef(false);
 
   const fetchDocument = async (showLoading = true) => {
     if (!documentId) return;
@@ -98,7 +99,17 @@ export function ReportSummaryPage() {
   };
 
   const handleReanalyze = async () => {
-    if (!document) return;
+    if (
+      !document ||
+      reanalyzeInFlightRef.current ||
+      document.status === "processing" ||
+      document.status === "queued" ||
+      document.analyses[0]?.status === "processing" ||
+      document.analyses[0]?.status === "queued"
+    ) {
+      return;
+    }
+    reanalyzeInFlightRef.current = true;
     setAnalyzing(true);
     setStatusMessage(null);
     try {
@@ -113,6 +124,7 @@ export function ReportSummaryPage() {
       setStatusMessage(err?.message || "Failed to re-run AI analysis.");
     } finally {
       setAnalyzing(false);
+      reanalyzeInFlightRef.current = false;
     }
   };
 
@@ -336,7 +348,7 @@ export function ReportSummaryPage() {
                   type="button"
                   className="button button--primary button--compact"
                   onClick={handleReanalyze}
-                  disabled={analyzing}
+                  disabled={analyzing || isProcessing}
                   style={{ fontSize: 12 }}
                 >
                   <RefreshCw size={13} className={analyzing ? "spinner" : ""} />

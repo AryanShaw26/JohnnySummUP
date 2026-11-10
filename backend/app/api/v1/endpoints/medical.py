@@ -271,7 +271,16 @@ async def analyze_document(
         )
 
     file_path = storage_service.get_file_path(doc.storage_key, current_user.id)
+<<<<<<< HEAD
+    extracted_text, _, _ = extraction_service.extract_text(file_path, doc.mime_type)
+    image_data_url = (
+        extraction_service.image_data_url(file_path, doc.mime_type)
+        if doc.mime_type.startswith("image/")
+        else None
+    )
+=======
     extraction_result = extraction_service.extract_document(file_path, doc.mime_type)
+>>>>>>> aryan
 
     analysis = await analysis_service.run_analysis(
         db=db,
@@ -279,7 +288,11 @@ async def analyze_document(
         user_id=current_user.id,
         extracted_text=extraction_result.text,
         document_type=doc.document_type,
+<<<<<<< HEAD
+        image_data_url=image_data_url,
+=======
         requested_provider=provider,
+>>>>>>> aryan
     )
     return DocumentAnalysisResponse.model_validate(analysis)
 

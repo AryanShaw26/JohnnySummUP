@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import tempfile
 
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
@@ -35,3 +36,4 @@ if test_database_url.startswith("postgresql"):
 os.environ["DATABASE_URL"] = test_database_url
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-that-is-at-least-32-characters")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://127.0.0.1:5173")
+os.environ["MEDICAL_STORAGE_PATH"] = tempfile.mkdtemp(prefix="johnnysummup-test-uploads-")

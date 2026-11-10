@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -18,6 +19,23 @@ from app.models.medical_document import MedicalDocument
 from app.models.medical_measurement import MedicalMeasurement
 
 logger = logging.getLogger("johnnysummup.medical.analysis")
+
+QUOTA_ERROR_MARKERS = (
+    "insufficient_quota",
+    "billing_hard_limit",
+    "billing_not_active",
+    "quota",
+    "credit",
+)
+
+
+def _is_quota_error(error_type: str, error_code: str, error_message: str) -> bool:
+    return any(
+        marker in value
+        for value in (error_type, error_code, error_message)
+        for marker in QUOTA_ERROR_MARKERS
+    )
+
 
 SYSTEM_PROMPT = """You are a medical document analyzer for JohnnySummUP.
 Analyze the provided medical report text and extract structured information strictly according to what is present in the document.
@@ -314,6 +332,7 @@ class MedicalAnalysisService:
         document_type: str,
         requested_provider: str | None = None,
         mock_response: dict[str, Any] | None = None,
+        image_data_url: str | None = None,
     ) -> DocumentAnalysis:
         request_id = str(uuid4())
 
@@ -322,9 +341,38 @@ class MedicalAnalysisService:
         if not doc or doc.user_id != user_id:
             raise ValueError("Document not found or ownership mismatch")
 
-        # Determine next version
-        existing_versions = [a.version for a in doc.analyses] if doc.analyses else []
-        next_version = (max(existing_versions) + 1) if existing_versions else 1
+        claim = db.execute(
+            update(MedicalDocument)
+            .where(
+                MedicalDocument.id == document_id,
+                MedicalDocument.user_id == user_id,
+                MedicalDocument.deleted_at.is_(None),
+                MedicalDocument.status.notin_(("processing", "queued")),
+            )
+            .values(status="processing", failure_code=None, failure_message=None)
+            .execution_options(synchronize_session=False)
+        )
+        if claim.rowcount != 1:
+            active_analysis = db.scalar(
+                select(DocumentAnalysis)
+                .where(
+                    DocumentAnalysis.document_id == document_id,
+                    DocumentAnalysis.user_id == user_id,
+                    DocumentAnalysis.status.in_(("queued", "processing")),
+                )
+                .order_by(DocumentAnalysis.version.desc())
+                .limit(1)
+            )
+            if active_analysis is not None:
+                return active_analysis
+            raise ValueError("Document is already marked as processing without an active analysis")
+
+        latest_version = db.scalar(
+            select(func.max(DocumentAnalysis.version)).where(
+                DocumentAnalysis.document_id == document_id
+            )
+        )
+        next_version = (latest_version or 0) + 1
 
         provider_name, model_name, api_key = cls.resolve_provider(requested_provider)
 
@@ -333,14 +381,27 @@ class MedicalAnalysisService:
             user_id=user_id,
             version=next_version,
             status="processing",
+<<<<<<< HEAD
+            extracted_text=extracted_text[:10000] if extracted_text else None,
+            provider="mock" if mock_response is not None else ("openai" if settings.openai_api_key else None),
+            model_name=(
+                "mock"
+                if mock_response is not None
+                else (settings.openai_model if settings.openai_api_key else None)
+            ),
+            prompt_version="v1.0",
+=======
             extracted_text=extracted_text[:12000] if extracted_text else None,
             provider="mock" if mock_response is not None else provider_name,
             model_name="mock" if mock_response is not None else model_name,
             prompt_version="v1.1",
+>>>>>>> aryan
             started_at=datetime.now(timezone.utc),
         )
         db.add(analysis)
         doc.status = "processing"
+        doc.failure_code = None
+        doc.failure_message = None
         db.commit()
         db.refresh(analysis)
 
@@ -355,8 +416,13 @@ class MedicalAnalysisService:
         )
 
         # Check if text is present
+<<<<<<< HEAD
+        if not extracted_text.strip() and image_data_url is None:
+            logger.warning("extraction_failed_no_text document_id=%s", doc.id)
+=======
         if not extracted_text or not extracted_text.strip():
             logger.warning("extraction_failed_no_text request_id=%s document_id=%s", request_id, doc.id)
+>>>>>>> aryan
             analysis.status = "failed"
             analysis.error_code = "extraction_empty"
             analysis.error_message = "No readable text was extracted. Try a clearer scan or another file."
@@ -392,6 +458,52 @@ class MedicalAnalysisService:
             db.commit()
             return analysis
 
+<<<<<<< HEAD
+        # Call OpenAI Chat Completion
+        document_content = (
+            extracted_text[:8000]
+            if extracted_text.strip()
+            else "No text layer was extracted; analyze the attached image."
+        )
+        user_prompt = (
+            f"Document Type: {document_type}\nFilename: {doc.original_filename}\n\n"
+            f"Document Text:\n{document_content}"
+        )
+        user_content: str | list[dict[str, Any]] = user_prompt
+        if image_data_url is not None:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_data_url, "detail": "high"},
+                },
+            ]
+
+        logger.info(
+            "provider_request_started document_id=%s provider=openai model=%s",
+            doc.id,
+            settings.openai_model,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    f"{settings.openai_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": settings.openai_model,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_content},
+                        ],
+                        "temperature": 0.1,
+                    },
+                )
+=======
         # Bound extracted text to avoid prompt exhaustion and wrap in untrusted data delimiters
         safe_text = extracted_text[:10000]
         user_prompt = (
@@ -430,9 +542,74 @@ class MedicalAnalysisService:
                     err_code, err_msg = cls._classify_http_error("gemini", response.status_code, response.text, request_id)
                     logger.error("gemini_request_failed request_id=%s status=%d code=%s", request_id, response.status_code, err_code)
                     return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
+>>>>>>> aryan
 
                 gemini_resp = response.json()
                 try:
+<<<<<<< HEAD
+                    response_data = response.json()
+                    if isinstance(response_data, dict) and isinstance(response_data.get("error"), dict):
+                        error_body = response_data["error"]
+                except (ValueError, TypeError):
+                    pass
+
+                error_type = str(error_body.get("type", "")).lower()
+                error_msg = str(error_body.get("message", "")).lower()
+                provider_error_code = str(error_body.get("code", "")).lower()
+                status_code = response.status_code
+
+                logger.error(
+                    "provider_request_failed document_id=%s status_code=%d error_type=%s provider_error_code=%s",
+                    doc.id,
+                    status_code,
+                    error_type,
+                    provider_error_code,
+                )
+
+                if status_code == 429:
+                    if _is_quota_error(error_type, provider_error_code, error_msg):
+                        analysis.error_code = "PROVIDER_INSUFFICIENT_QUOTA"
+                        analysis.error_message = (
+                            "The AI provider rejected this request because its API quota or billing "
+                            "limit is unavailable. Rejected requests may not appear in usage history. "
+                            "Check billing, project spending limits, and that this API key belongs "
+                            "to the intended project."
+                        )
+                    else:
+                        analysis.error_code = "PROVIDER_RATE_LIMIT"
+                        analysis.error_message = (
+                            "Analysis rate limit exceeded. Please wait a moment and retry."
+                        )
+                elif status_code == 401:
+                    analysis.error_code = "PROVIDER_AUTH_ERROR"
+                    analysis.error_message = (
+                        "The AI provider rejected OPENAI_API_KEY. Set it to an active API key issued "
+                        "by the provider at OPENAI_BASE_URL, then restart the backend. The default "
+                        "URL uses OpenAI API keys; ChatGPT subscriptions are not API keys."
+                    )
+                elif status_code == 404:
+                    analysis.error_code = "MODEL_NOT_FOUND"
+                    analysis.error_message = (
+                        f"AI model '{settings.openai_model}' was not found. "
+                        "Check OPENAI_MODEL and OPENAI_BASE_URL."
+                    )
+                elif status_code == 403:
+                    analysis.error_code = "PROVIDER_PERMISSION_ERROR"
+                    analysis.error_message = (
+                        "The AI provider rejected this API key. Check that the key has permission "
+                        "to use the configured model."
+                    )
+                elif status_code == 400:
+                    analysis.error_code = "PROVIDER_INVALID_REQUEST"
+                    analysis.error_message = (
+                        "The AI provider rejected the request. Check the configured model and "
+                        "provider compatibility."
+                    )
+                elif status_code >= 500:
+                    analysis.error_code = "PROVIDER_SERVER_ERROR"
+                    analysis.error_message = (
+                        "AI analysis provider encountered a temporary server error. Please try again later."
+=======
                     raw_content = gemini_resp["candidates"][0]["content"]["parts"][0]["text"]
                 except (KeyError, IndexError):
                     return cls._mark_analysis_failed(
@@ -456,6 +633,7 @@ class MedicalAnalysisService:
                             ],
                             "temperature": 0.1,
                         },
+>>>>>>> aryan
                     )
                 if response.status_code != 200:
                     err_code, err_msg = cls._classify_http_error("openai", response.status_code, response.text, request_id)
