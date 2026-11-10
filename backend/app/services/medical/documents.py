@@ -20,6 +20,7 @@ class MedicalDocumentService:
         document_type: str,
         user_id: UUID,
         report_date: date | None = None,
+        provider: str | None = None,
     ) -> MedicalDocument:
         # Validate document_type
         allowed_types = {"prescription", "laboratory_report", "other"}
@@ -49,8 +50,9 @@ class MedicalDocumentService:
         db.commit()
         db.refresh(doc)
 
-        # Extract text
+        # Extract text using structured extraction pipeline
         file_path = storage_service.get_file_path(storage_key, user_id)
+<<<<<<< HEAD
         extracted_text, pages, _ = extraction_service.extract_text(file_path, mime_type)
         image_data_url = (
             extraction_service.image_data_url(file_path, mime_type)
@@ -67,6 +69,31 @@ class MedicalDocumentService:
             document_type=document_type,
             image_data_url=image_data_url,
         )
+=======
+        extraction_result = extraction_service.extract_document(file_path, mime_type)
+
+        if extraction_result.status in ("corrupt", "encrypted", "unsupported"):
+            doc.status = "failed"
+            doc.failure_code = extraction_result.error_code or "EXTRACTION_FAILED"
+            doc.failure_message = extraction_result.error_message or "Failed to read document."
+            db.commit()
+            db.refresh(doc)
+            return doc
+
+        # Trigger initial analysis
+        try:
+            await analysis_service.run_analysis(
+                db=db,
+                document_id=doc.id,
+                user_id=user_id,
+                extracted_text=extraction_result.text,
+                document_type=document_type,
+                requested_provider=provider,
+            )
+        except Exception:
+            # Document is still saved safely even if analysis fails
+            pass
+>>>>>>> aryan
 
         db.refresh(doc)
         return doc

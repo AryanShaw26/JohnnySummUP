@@ -53,6 +53,7 @@ async def upload_document(
     file: UploadFile = File(...),
     document_type: str = Form(...),
     report_date: date | None = Form(None),
+    provider: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -62,6 +63,7 @@ async def upload_document(
         document_type=document_type,
         user_id=current_user.id,
         report_date=report_date,
+        provider=provider,
     )
     latest_analysis = doc.analyses[0] if doc.analyses else None
     return MedicalDocumentResponse(
@@ -257,6 +259,7 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
+    provider: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -268,20 +271,28 @@ async def analyze_document(
         )
 
     file_path = storage_service.get_file_path(doc.storage_key, current_user.id)
+<<<<<<< HEAD
     extracted_text, _, _ = extraction_service.extract_text(file_path, doc.mime_type)
     image_data_url = (
         extraction_service.image_data_url(file_path, doc.mime_type)
         if doc.mime_type.startswith("image/")
         else None
     )
+=======
+    extraction_result = extraction_service.extract_document(file_path, doc.mime_type)
+>>>>>>> aryan
 
     analysis = await analysis_service.run_analysis(
         db=db,
         document_id=doc.id,
         user_id=current_user.id,
-        extracted_text=extracted_text,
+        extracted_text=extraction_result.text,
         document_type=doc.document_type,
+<<<<<<< HEAD
         image_data_url=image_data_url,
+=======
+        requested_provider=provider,
+>>>>>>> aryan
     )
     return DocumentAnalysisResponse.model_validate(analysis)
 
@@ -556,3 +567,22 @@ def get_report_timeline(
     current_user: User = Depends(get_current_user),
 ):
     return analytics_service.get_timeline(db, current_user.id)
+
+
+# --- Diagnostics (Development / Admin) ---
+
+@router.get("/diagnostics/provider")
+def get_provider_diagnostics(
+    current_user: User = Depends(get_current_user),
+):
+    """Returns provider configurations and key-present boolean without exposing secret values."""
+    return analysis_service.get_provider_diagnostics()
+
+
+@router.post("/diagnostics/test")
+async def test_provider_connection(
+    provider: str = Query("openai"),
+    current_user: User = Depends(get_current_user),
+):
+    """Tests connectivity to the requested provider using a minimal non-medical ping."""
+    return await analysis_service.test_provider_connectivity(provider)

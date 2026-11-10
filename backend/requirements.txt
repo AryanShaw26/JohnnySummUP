@@ -12,4 +12,7 @@ pytest>=8.0,<9.0
 httpx>=0.27,<1.0
 python-multipart>=0.0.12
 pypdf>=5.0.0
+pymupdf>=2.1
+pillow>=10.0
+pytesseract>=0.3.10
 
