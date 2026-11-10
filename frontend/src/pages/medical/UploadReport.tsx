@@ -171,7 +171,7 @@ export function UploadReportPage() {
                 Drag &amp; drop your file here <span>or click to browse</span>
               </div>
               <div className="dropzone__subtitle">
-                Supported formats: PDF (with selectable text layer), JPG, PNG (Max 10 MB)
+                Supported formats: PDF (digital or scanned), JPG, PNG (Max 10 MB)
               </div>
             </>
           )}

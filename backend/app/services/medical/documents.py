@@ -20,6 +20,7 @@ class MedicalDocumentService:
         document_type: str,
         user_id: UUID,
         report_date: date | None = None,
+        provider: str | None = None,
     ) -> MedicalDocument:
         # Validate document_type
         allowed_types = {"prescription", "laboratory_report", "other"}
@@ -49,9 +50,9 @@ class MedicalDocumentService:
         db.commit()
         db.refresh(doc)
 
-        # Extract text
+        # Extract text using multi-strategy document pipeline
         file_path = storage_service.get_file_path(storage_key, user_id)
-        extracted_text, pages, _ = extraction_service.extract_text(file_path, mime_type)
+        extraction_result = extraction_service.extract_document(file_path, mime_type)
 
         # Trigger initial analysis
         try:
@@ -59,8 +60,10 @@ class MedicalDocumentService:
                 db=db,
                 document_id=doc.id,
                 user_id=user_id,
-                extracted_text=extracted_text,
+                extracted_text=extraction_result.full_text,
                 document_type=document_type,
+                extraction_result=extraction_result,
+                requested_provider=provider,
             )
         except Exception:
             # Document is still saved safely even if analysis fails

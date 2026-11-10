@@ -18,6 +18,9 @@ class DocumentAnalysisResponse(BaseModel):
     document_id: UUID
     version: int
     status: str
+    extraction_method: str | None = None
+    extracted_page_count: int | None = None
+    ocr_page_count: int | None = None
     extracted_text: str | None = None
     summary: str | None = None
     key_points: list[Any] | dict[str, Any] | None = None
@@ -26,6 +29,7 @@ class DocumentAnalysisResponse(BaseModel):
     prompt_version: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    request_id: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime
@@ -173,3 +177,29 @@ class TimelineItem(BaseModel):
     status: str
     key_measurements: list[dict[str, Any]] = Field(default_factory=list)
     flag_count: int = 0
+
+
+class ProviderInfo(BaseModel):
+    configured: bool
+    model: str
+
+
+class ProviderDiagnosticResponse(BaseModel):
+    active_provider: str
+    openai: ProviderInfo
+    gemini: ProviderInfo
+
+
+class ProviderTestRequest(BaseModel):
+    provider: str | None = None
+
+
+class ProviderTestResponse(BaseModel):
+    success: bool
+    provider: str
+    model: str
+    key_present: bool
+    latency_ms: int
+    error_code: str | None = None
+    error_message: str | None = None
+    request_id: str

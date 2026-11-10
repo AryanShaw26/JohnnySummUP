@@ -16,6 +16,9 @@ export interface DocumentAnalysis {
   document_id: string;
   version: number;
   status: string;
+  extraction_method?: string | null;
+  extracted_page_count?: number | null;
+  ocr_page_count?: number | null;
   extracted_text?: string | null;
   summary?: string | null;
   key_points?: string[] | null;
@@ -24,6 +27,7 @@ export interface DocumentAnalysis {
   prompt_version?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  request_id?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
   created_at: string;

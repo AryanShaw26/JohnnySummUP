@@ -17,12 +17,15 @@ const API_BASE_URL = import.meta.env.VITE_API_URL;
 export const medicalApi = {
   getOverview: () => request<MedicalOverview>("/api/medical/overview"),
 
-  uploadDocument: (file: File, documentType: DocumentType, reportDate?: string) => {
+  uploadDocument: (file: File, documentType: DocumentType, reportDate?: string, provider?: string) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("document_type", documentType);
     if (reportDate) {
       formData.append("report_date", reportDate);
+    }
+    if (provider) {
+      formData.append("provider", provider);
     }
     return request<MedicalDocument>("/api/medical/documents", {
       method: "POST",
@@ -65,8 +68,19 @@ export const medicalApi = {
 
   deleteDocument: (id: string) => request<void>(`/api/medical/documents/${id}`, { method: "DELETE" }),
 
-  analyzeDocument: (id: string) =>
-    request<DocumentAnalysis>(`/api/medical/documents/${id}/analyze`, { method: "POST" }),
+  analyzeDocument: (id: string, provider?: string) => {
+    const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+    return request<DocumentAnalysis>(`/api/medical/documents/${id}/analyze${query}`, { method: "POST" });
+  },
+
+  getProviderDiagnostics: () => request<any>("/api/medical/admin/diagnostics/provider"),
+
+  testProviderConnectivity: (provider?: string) =>
+    request<any>("/api/medical/admin/diagnostics/provider/test", {
+      method: "POST",
+      body: JSON.stringify(provider ? { provider } : {}),
+      headers: { "Content-Type": "application/json" },
+    }),
 
   downloadDocument: async (id: string, originalFilename: string) => {
     const response = await fetch(`${API_BASE_URL}/api/medical/documents/${id}/download`, {

@@ -7,7 +7,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_admin_user, get_current_user
 from app.models.abnormality_flag import AbnormalityFlag
 from app.models.document_analysis import DocumentAnalysis
 from app.models.extracted_finding import ExtractedFinding
@@ -24,6 +24,10 @@ from app.schemas.medical import (
     MedicalMeasurementResponse,
     MedicalOverviewResponse,
     ParameterComparisonResponse,
+    ProviderDiagnosticResponse,
+    ProviderInfo,
+    ProviderTestRequest,
+    ProviderTestResponse,
     TimelineItem,
     TrendResponse,
 )
@@ -53,6 +57,7 @@ async def upload_document(
     file: UploadFile = File(...),
     document_type: str = Form(...),
     report_date: date | None = Form(None),
+    provider: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -62,6 +67,7 @@ async def upload_document(
         document_type=document_type,
         user_id=current_user.id,
         report_date=report_date,
+        provider=provider,
     )
     latest_analysis = doc.analyses[0] if doc.analyses else None
     return MedicalDocumentResponse(
@@ -257,9 +263,12 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
+    provider: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from app.services.medical.analysis import ConcurrentAnalysisError
+
     doc = db.get(MedicalDocument, document_id)
     if not doc or doc.user_id != current_user.id or doc.deleted_at is not None:
         raise HTTPException(
@@ -268,15 +277,24 @@ async def analyze_document(
         )
 
     file_path = storage_service.get_file_path(doc.storage_key, current_user.id)
-    extracted_text, _, _ = extraction_service.extract_text(file_path, doc.mime_type)
+    extraction_result = extraction_service.extract_document(file_path, doc.mime_type)
 
-    analysis = await analysis_service.run_analysis(
-        db=db,
-        document_id=doc.id,
-        user_id=current_user.id,
-        extracted_text=extracted_text,
-        document_type=doc.document_type,
-    )
+    try:
+        analysis = await analysis_service.run_analysis(
+            db=db,
+            document_id=doc.id,
+            user_id=current_user.id,
+            extracted_text=extraction_result.full_text,
+            document_type=doc.document_type,
+            extraction_result=extraction_result,
+            requested_provider=provider,
+        )
+    except ConcurrentAnalysisError as cae:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(cae),
+        )
+
     return DocumentAnalysisResponse.model_validate(analysis)
 
 
@@ -550,3 +568,35 @@ def get_report_timeline(
     current_user: User = Depends(get_current_user),
 ):
     return analytics_service.get_timeline(db, current_user.id)
+
+
+# --- Admin Diagnostic Endpoints ---
+
+@router.get("/admin/diagnostics/provider", response_model=ProviderDiagnosticResponse)
+def get_provider_diagnostics(
+    current_user: User = Depends(get_current_admin_user),
+):
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return ProviderDiagnosticResponse(
+        active_provider=settings.ai_provider,
+        openai=ProviderInfo(
+            configured=bool(settings.openai_api_key),
+            model=settings.openai_model,
+        ),
+        gemini=ProviderInfo(
+            configured=bool(settings.gemini_api_key),
+            model=settings.gemini_model,
+        ),
+    )
+
+
+@router.post("/admin/diagnostics/provider/test", response_model=ProviderTestResponse)
+async def test_provider_diagnostics(
+    payload: ProviderTestRequest | None = None,
+    current_user: User = Depends(get_current_admin_user),
+):
+    provider = payload.provider if payload else None
+    result = await analysis_service.test_provider_connectivity(provider)
+    return ProviderTestResponse(**result)

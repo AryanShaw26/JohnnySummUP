@@ -27,6 +27,7 @@ export function ReportSummaryPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [retryProvider, setRetryProvider] = useState<"openai" | "gemini">("openai");
 
   const pollingRef = useRef<number | null>(null);
 
@@ -102,7 +103,7 @@ export function ReportSummaryPage() {
     setAnalyzing(true);
     setStatusMessage(null);
     try {
-      const result = await medicalApi.analyzeDocument(document.id);
+      const result = await medicalApi.analyzeDocument(document.id, retryProvider);
       if (result.status === "failed") {
         setStatusMessage(result.error_message || "Analysis failed. Please check the error details below.");
       } else if (result.status === "completed") {
@@ -218,6 +219,20 @@ export function ReportSummaryPage() {
                 <span className="badge badge--purple">
                   {document.document_type.replace("_", " ").toUpperCase()}
                 </span>
+                {latestAnalysis?.extraction_method && (
+                  <span className="badge badge--gray">
+                    {latestAnalysis.extraction_method === "ocr"
+                      ? "OCR"
+                      : latestAnalysis.extraction_method === "hybrid"
+                      ? "Hybrid Text/OCR"
+                      : "Digital PDF Text"}
+                  </span>
+                )}
+                {latestAnalysis?.provider && (
+                  <span className="badge badge--purple" style={{ textTransform: "capitalize" }}>
+                    {latestAnalysis.provider} ({latestAnalysis.model_name || "default"})
+                  </span>
+                )}
                 <span>Report Date: {repDate}</span>
                 <span>•</span>
                 <span>{(document.file_size_bytes / 1024).toFixed(1)} KB</span>
@@ -321,7 +336,11 @@ export function ReportSummaryPage() {
             >
               <div style={{ display: "flex", alignItems: "center", gap: 12, color: "#dc2626" }}>
                 <AlertCircle size={22} className="flex-shrink-0" />
-                <strong style={{ fontSize: 15 }}>AI Analysis Notice</strong>
+                <strong style={{ fontSize: 15 }}>
+                  {failureCode && ["OCR_NO_TEXT", "OCR_NOT_CONFIGURED", "CORRUPT_DOCUMENT", "ENCRYPTED_DOCUMENT", "UNSUPPORTED_DOCUMENT", "extraction_empty"].includes(failureCode)
+                    ? "Document Extraction Notice"
+                    : "AI Analysis Notice"}
+                </strong>
                 {failureCode && (
                   <span className="badge badge--red" style={{ fontSize: 10, padding: "2px 8px" }}>
                     {failureCode}
@@ -331,7 +350,16 @@ export function ReportSummaryPage() {
               <p style={{ margin: "2px 0 6px", fontSize: 13, color: "#7f1d1d", lineHeight: 1.6 }}>
                 {failureMessage}
               </p>
-              <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+                <select
+                  value={retryProvider}
+                  onChange={(e) => setRetryProvider(e.target.value as "openai" | "gemini")}
+                  className="input"
+                  style={{ padding: "4px 8px", fontSize: 12, height: 32, width: "auto" }}
+                >
+                  <option value="openai">OpenAI (gpt-4o-mini)</option>
+                  <option value="gemini">Gemini (gemini-1.5-flash)</option>
+                </select>
                 <button
                   type="button"
                   className="button button--primary button--compact"

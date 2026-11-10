@@ -29,3 +29,21 @@ def get_current_user(
     if user is None:
         raise unauthorized
     return user
+
+
+def get_current_admin_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    admin_list = [e.lower().strip() for e in settings.admin_emails]
+    user_email = current_user.email.lower().strip()
+
+    is_admin = user_email in admin_list or user_email.startswith("admin@")
+    if not is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin authorization required to access diagnostic endpoints.",
+        )
+    return current_user

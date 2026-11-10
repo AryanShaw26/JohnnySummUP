@@ -24,11 +24,19 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
+    ai_provider: Literal["openai", "gemini"] = "openai"
     openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-4o-mini"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-1.5-flash"
+    admin_emails: list[str] = ["admin@johnnysummup.com", "admin@example.com"]
     medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
     medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
     medical_allowed_extensions: list[str] = [".pdf", ".jpg", ".jpeg", ".png"]
+    tesseract_cmd: str | None = None
+    ocr_dpi: int = Field(default=200, ge=72, le=600)
+    ocr_max_pages: int = Field(default=20, ge=1, le=100)
 
     @field_validator("jwt_secret_key")
     @classmethod
@@ -53,6 +61,13 @@ class Settings(BaseSettings):
     @field_validator("openai_api_key", mode="before")
     @classmethod
     def normalize_optional_openai_key(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        return value
+
+    @field_validator("gemini_api_key", mode="before")
+    @classmethod
+    def normalize_optional_gemini_key(cls, value):
         if value is None or not str(value).strip():
             return None
         return value
