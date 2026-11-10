@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator
@@ -25,11 +26,16 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
     openai_api_key: SecretStr | None = None
+<<<<<<< HEAD
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=120)
+=======
     openai_model: str = "gpt-4o-mini"
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-1.5-flash"
     default_ai_provider: Literal["openai", "gemini"] = "openai"
     tesseract_cmd: str | None = None
+>>>>>>> aryan
     medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
     medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
@@ -62,6 +68,16 @@ class Settings(BaseSettings):
             return None
         return value
 
+<<<<<<< HEAD
+    @field_validator("openai_base_url")
+    @classmethod
+    def validate_openai_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+            raise ValueError("OPENAI_BASE_URL must be an HTTP(S) base URL without a query or fragment")
+        return value
+=======
     @field_validator("gemini_api_key", mode="before")
     @classmethod
     def normalize_optional_gemini_key(cls, value):
@@ -72,6 +88,7 @@ class Settings(BaseSettings):
         if google_key:
             return google_key
         return None
+>>>>>>> aryan
 
 
 @lru_cache

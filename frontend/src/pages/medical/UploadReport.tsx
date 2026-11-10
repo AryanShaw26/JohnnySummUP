@@ -31,6 +31,7 @@ const CATEGORIES: CategoryOption[] = [
 export function UploadReportPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadInFlightRef = useRef(false);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>("blood_test");
@@ -87,11 +88,13 @@ export function UploadReportPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (uploadInFlightRef.current) return;
     if (!selectedFile) {
       setError("Please select a file to upload.");
       return;
     }
 
+    uploadInFlightRef.current = true;
     const catObj = CATEGORIES.find((c) => c.id === selectedCategory);
     const docType: DocumentType = catObj ? catObj.docType : "laboratory_report";
 
@@ -109,6 +112,7 @@ export function UploadReportPage() {
     } catch (err: any) {
       setError(err?.message || "Failed to upload document. Please try again.");
       setUploading(false);
+      uploadInFlightRef.current = false;
     }
   };
 
