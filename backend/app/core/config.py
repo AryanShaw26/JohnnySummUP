@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
     openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-4o-mini"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-1.5-flash"
+    default_ai_provider: Literal["openai", "gemini"] = "openai"
+    tesseract_cmd: str | None = None
     medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
     medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
@@ -56,6 +61,17 @@ class Settings(BaseSettings):
         if value is None or not str(value).strip():
             return None
         return value
+
+    @field_validator("gemini_api_key", mode="before")
+    @classmethod
+    def normalize_optional_gemini_key(cls, value):
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        import os
+        google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+        if google_key:
+            return google_key
+        return None
 
 
 @lru_cache

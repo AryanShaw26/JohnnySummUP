@@ -14,7 +14,17 @@ from app.models.base import Base
 from app.models.user import User
 from app.core.security import verify_password
 
-test_engine = create_engine(os.environ["TEST_DATABASE_URL"], pool_pre_ping=True)
+from sqlalchemy.pool import StaticPool
+
+db_url = os.environ["TEST_DATABASE_URL"]
+if "sqlite" in db_url:
+    test_engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    test_engine = create_engine(db_url, pool_pre_ping=True)
 TestSession = sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)
 
 

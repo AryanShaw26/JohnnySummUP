@@ -1,9 +1,10 @@
 import json
 import logging
+import time
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -120,15 +121,201 @@ class RawAnalysisOutput(BaseModel):
 
 class MedicalAnalysisService:
     @staticmethod
+    def resolve_provider(requested_provider: str | None = None) -> tuple[str, str, str | None]:
+        """
+        Resolves the provider to use, model name, and API key.
+        Returns: (provider_name, model_name, api_key_or_none)
+        """
+        settings = get_settings()
+        openai_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
+        gemini_key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else None
+
+        req = (requested_provider or "").strip().lower()
+
+        if req == "gemini":
+            return "gemini", settings.gemini_model, gemini_key
+        elif req == "openai":
+            return "openai", settings.openai_model, openai_key
+        else:
+            # Default fallback based on configured keys
+            if settings.default_ai_provider == "gemini" and gemini_key:
+                return "gemini", settings.gemini_model, gemini_key
+            if openai_key:
+                return "openai", settings.openai_model, openai_key
+            if gemini_key:
+                return "gemini", settings.gemini_model, gemini_key
+            # Neither configured, default to settings preference
+            chosen = settings.default_ai_provider
+            chosen_model = settings.gemini_model if chosen == "gemini" else settings.openai_model
+            return chosen, chosen_model, None
+
+    @staticmethod
+    def get_provider_diagnostics() -> dict[str, Any]:
+        """Returns provider availability and configuration metadata without exposing secret keys."""
+        settings = get_settings()
+        return {
+            "openai": {
+                "configured": bool(settings.openai_api_key and settings.openai_api_key.get_secret_value()),
+                "model": settings.openai_model,
+            },
+            "gemini": {
+                "configured": bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value()),
+                "model": settings.gemini_model,
+            },
+            "default_provider": settings.default_ai_provider,
+        }
+
+    @classmethod
+    async def test_provider_connectivity(cls, provider: str) -> dict[str, Any]:
+        """Runs a minimal non-medical connectivity check against the requested provider."""
+        settings = get_settings()
+        request_id = str(uuid4())
+        start_time = time.time()
+
+        prov, model_name, api_key = cls.resolve_provider(provider)
+        if not api_key:
+            return {
+                "success": False,
+                "provider": prov,
+                "model": model_name,
+                "request_id": request_id,
+                "error_code": "authentication_failed",
+                "error_message": f"AI provider '{prov}' is not configured with an API key.",
+                "duration_ms": int((time.time() - start_time) * 1000),
+            }
+
+        try:
+            if prov == "gemini":
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}",
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "contents": [{"parts": [{"text": "Return JSON: {\"status\": \"ok\"}"}]}],
+                            "generationConfig": {"responseMimeType": "application/json"},
+                        },
+                    )
+            else:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model_name,
+                            "messages": [{"role": "user", "content": "Return JSON: {\"status\": \"ok\"}"}],
+                            "response_format": {"type": "json_object"},
+                            "temperature": 0.0,
+                        },
+                    )
+
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if resp.status_code == 200:
+                return {
+                    "success": True,
+                    "provider": prov,
+                    "model": model_name,
+                    "request_id": request_id,
+                    "duration_ms": duration_ms,
+                }
+
+            error_code, error_msg = cls._classify_http_error(prov, resp.status_code, resp.text, request_id)
+            return {
+                "success": False,
+                "provider": prov,
+                "model": model_name,
+                "request_id": request_id,
+                "error_code": error_code,
+                "error_message": error_msg,
+                "duration_ms": duration_ms,
+            }
+        except Exception as exc:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_code, error_msg = cls._classify_exception(exc, request_id)
+            return {
+                "success": False,
+                "provider": prov,
+                "model": model_name,
+                "request_id": request_id,
+                "error_code": error_code,
+                "error_message": error_msg,
+                "duration_ms": duration_ms,
+            }
+
+    @staticmethod
+    def _classify_http_error(provider: str, status_code: int, response_text: str, request_id: str) -> tuple[str, str]:
+        """Classifies HTTP errors into standardized error codes and safe messages (Section 5.3)."""
+        body_str = response_text.lower()
+
+        if status_code == 429:
+            # Distinguish actual exhausted billing quota from transient rate limits
+            if any(term in body_str for term in ["insufficient_quota", "quota_exceeded", "resource_exhausted", "quota", "credit"]):
+                return (
+                    "quota_exceeded",
+                    "The selected AI provider has exhausted its available quota. Check the provider project, billing and limits.",
+                )
+            return (
+                "rate_limited",
+                "The AI provider is temporarily rate-limiting requests. Please retry shortly.",
+            )
+        elif status_code in (401, 403):
+            if "api_key_invalid" in body_str or "unauthorized" in body_str or "invalid" in body_str:
+                return (
+                    "authentication_failed",
+                    "AI provider authentication failed. Check the configured API key.",
+                )
+            if "quota" in body_str or "resource_exhausted" in body_str:
+                return (
+                    "quota_exceeded",
+                    "The selected AI provider has exhausted its available quota. Check the provider project, billing and limits.",
+                )
+            return (
+                "authentication_failed",
+                "AI provider authentication failed. Check the configured API key.",
+            )
+        elif status_code == 404:
+            return (
+                "model_unavailable",
+                "The configured AI model is unavailable for this provider account.",
+            )
+        elif status_code >= 500:
+            return (
+                "provider_unavailable",
+                "Could not connect to the AI provider. Please retry.",
+            )
+        else:
+            return (
+                "provider_error",
+                f"AI analysis failed. Reference: {request_id}",
+            )
+
+    @staticmethod
+    def _classify_exception(exc: Exception, request_id: str) -> tuple[str, str]:
+        """Classifies runtime and network exceptions."""
+        if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+            return "provider_timeout", "AI analysis timed out. Please retry."
+        elif isinstance(exc, httpx.RequestError):
+            return "provider_unavailable", "Could not connect to the AI provider. Please retry."
+        elif isinstance(exc, (json.JSONDecodeError, ValidationError)):
+            return "invalid_provider_response", "The AI provider returned an unusable response."
+        else:
+            return "provider_error", f"AI analysis failed. Reference: {request_id}"
+
+    @classmethod
     async def run_analysis(
+        cls,
         db: Session,
         document_id: UUID,
         user_id: UUID,
         extracted_text: str,
         document_type: str,
+        requested_provider: str | None = None,
         mock_response: dict[str, Any] | None = None,
     ) -> DocumentAnalysis:
-        settings = get_settings()
+        request_id = str(uuid4())
 
         # Find document
         doc = db.get(MedicalDocument, document_id)
@@ -139,15 +326,17 @@ class MedicalAnalysisService:
         existing_versions = [a.version for a in doc.analyses] if doc.analyses else []
         next_version = (max(existing_versions) + 1) if existing_versions else 1
 
+        provider_name, model_name, api_key = cls.resolve_provider(requested_provider)
+
         analysis = DocumentAnalysis(
             document_id=doc.id,
             user_id=user_id,
             version=next_version,
             status="processing",
-            extracted_text=extracted_text[:10000] if extracted_text else None,
-            provider="mock" if mock_response is not None else ("openai" if settings.openai_api_key else None),
-            model_name="mock" if mock_response is not None else ("gpt-4o-mini" if settings.openai_api_key else None),
-            prompt_version="v1.0",
+            extracted_text=extracted_text[:12000] if extracted_text else None,
+            provider="mock" if mock_response is not None else provider_name,
+            model_name="mock" if mock_response is not None else model_name,
+            prompt_version="v1.1",
             started_at=datetime.now(timezone.utc),
         )
         db.add(analysis)
@@ -156,21 +345,21 @@ class MedicalAnalysisService:
         db.refresh(analysis)
 
         logger.info(
-            "analysis_queued document_id=%s analysis_id=%s version=%d",
+            "analysis_queued request_id=%s document_id=%s analysis_id=%s version=%d provider=%s model=%s",
+            request_id,
             doc.id,
             analysis.id,
             analysis.version,
+            provider_name,
+            model_name,
         )
 
         # Check if text is present
-        if not extracted_text.strip():
-            logger.warning("extraction_failed_no_text document_id=%s", doc.id)
+        if not extracted_text or not extracted_text.strip():
+            logger.warning("extraction_failed_no_text request_id=%s document_id=%s", request_id, doc.id)
             analysis.status = "failed"
-            analysis.error_code = "OCR_NO_TEXT"
-            analysis.error_message = (
-                "We could not extract readable text from this document. "
-                "Please upload a document with a selectable digital text layer."
-            )
+            analysis.error_code = "extraction_empty"
+            analysis.error_message = "No readable text was extracted. Try a clearer scan or another file."
             analysis.completed_at = datetime.now(timezone.utc)
             doc.status = "failed"
             doc.failure_code = analysis.error_code
@@ -180,7 +369,7 @@ class MedicalAnalysisService:
 
         # If mock_response is provided for testing, use it directly
         if mock_response is not None:
-            return MedicalAnalysisService._persist_analysis_output(
+            return cls._persist_analysis_output(
                 db=db,
                 doc=doc,
                 analysis=analysis,
@@ -188,14 +377,13 @@ class MedicalAnalysisService:
                 parsed_data=mock_response,
             )
 
-        # Check if OpenAI key is configured
-        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
+        # Check if API key is configured for selected provider
         if not api_key:
-            logger.info("provider_not_configured document_id=%s", doc.id)
+            logger.info("provider_not_configured request_id=%s provider=%s", request_id, provider_name)
             analysis.status = "unavailable"
             analysis.error_code = "AI_NOT_CONFIGURED"
             analysis.error_message = (
-                "AI analysis is not configured on this server. Document is safely stored."
+                f"AI analysis with {provider_name.upper()} is not configured on this server. Document is safely stored."
             )
             analysis.completed_at = datetime.now(timezone.utc)
             doc.status = "analysis_unavailable"
@@ -204,90 +392,83 @@ class MedicalAnalysisService:
             db.commit()
             return analysis
 
-        # Call OpenAI Chat Completion
-        user_prompt = f"Document Type: {document_type}\nFilename: {doc.original_filename}\n\nDocument Text:\n{extracted_text[:8000]}"
+        # Bound extracted text to avoid prompt exhaustion and wrap in untrusted data delimiters
+        safe_text = extracted_text[:10000]
+        user_prompt = (
+            f"Document Type: {document_type}\n"
+            f"Filename: {doc.original_filename}\n\n"
+            f"<DOCUMENT_CONTENT>\n{safe_text}\n</DOCUMENT_CONTENT>"
+        )
 
-        logger.info("provider_request_started document_id=%s provider=openai model=gpt-4o-mini", doc.id)
+        logger.info(
+            "provider_request_started request_id=%s document_id=%s provider=%s model=%s",
+            request_id,
+            doc.id,
+            provider_name,
+            model_name,
+        )
 
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "gpt-4o-mini",
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": 0.1,
-                    },
-                )
+            raw_content = ""
+            if provider_name == "gemini":
+                # Google Gemini API Call
+                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    response = await client.post(
+                        gemini_url,
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                            "contents": [{"parts": [{"text": user_prompt}]}],
+                            "generationConfig": {
+                                "temperature": 0.1,
+                                "responseMimeType": "application/json",
+                            },
+                        },
+                    )
+                if response.status_code != 200:
+                    err_code, err_msg = cls._classify_http_error("gemini", response.status_code, response.text, request_id)
+                    logger.error("gemini_request_failed request_id=%s status=%d code=%s", request_id, response.status_code, err_code)
+                    return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
 
-            if response.status_code != 200:
-                error_body: dict[str, Any] = {}
+                gemini_resp = response.json()
                 try:
-                    error_body = response.json().get("error", {})
-                except Exception:
-                    pass
-
-                error_type = str(error_body.get("type", "")).lower()
-                error_msg = str(error_body.get("message", "")).lower()
-                status_code = response.status_code
-
-                logger.error(
-                    "provider_request_failed document_id=%s status_code=%d error_type=%s",
-                    doc.id,
-                    status_code,
-                    error_type,
-                )
-
-                if status_code == 429:
-                    if "insufficient_quota" in error_type or "quota" in error_msg or "credit" in error_msg:
-                        analysis.error_code = "PROVIDER_INSUFFICIENT_QUOTA"
-                        analysis.error_message = (
-                            "Analysis is temporarily unavailable due to AI provider quota limits. "
-                            "Please check your API account credits or try again later."
-                        )
-                    else:
-                        analysis.error_code = "PROVIDER_RATE_LIMIT"
-                        analysis.error_message = (
-                            "Analysis rate limit exceeded. Please wait a moment and retry."
-                        )
-                elif status_code == 401:
-                    analysis.error_code = "PROVIDER_AUTH_ERROR"
-                    analysis.error_message = (
-                        "AI analysis provider authentication failed. Please check the backend API key."
+                    raw_content = gemini_resp["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError):
+                    return cls._mark_analysis_failed(
+                        db, doc, analysis, "invalid_provider_response", "The AI provider returned an unusable response."
                     )
-                elif status_code == 404:
-                    analysis.error_code = "MODEL_NOT_FOUND"
-                    analysis.error_message = "The configured AI analysis model is not available."
-                elif status_code >= 500:
-                    analysis.error_code = "PROVIDER_SERVER_ERROR"
-                    analysis.error_message = (
-                        "AI analysis provider encountered a temporary server error. Please try again later."
+            else:
+                # OpenAI Chat Completion Call
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    response = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model_name,
+                            "response_format": {"type": "json_object"},
+                            "messages": [
+                                {"role": "system", "content": SYSTEM_PROMPT},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "temperature": 0.1,
+                        },
                     )
-                else:
-                    analysis.error_code = f"PROVIDER_ERROR_{status_code}"
-                    analysis.error_message = (
-                        "Analysis provider returned an error while processing this document."
+                if response.status_code != 200:
+                    err_code, err_msg = cls._classify_http_error("openai", response.status_code, response.text, request_id)
+                    logger.error("openai_request_failed request_id=%s status=%d code=%s", request_id, response.status_code, err_code)
+                    return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
+
+                openai_resp = response.json()
+                try:
+                    raw_content = openai_resp["choices"][0]["message"]["content"] or ""
+                except (KeyError, IndexError):
+                    return cls._mark_analysis_failed(
+                        db, doc, analysis, "invalid_provider_response", "The AI provider returned an unusable response."
                     )
-
-                analysis.status = "failed"
-                analysis.completed_at = datetime.now(timezone.utc)
-                doc.status = "failed"
-                doc.failure_code = analysis.error_code
-                doc.failure_message = analysis.error_message
-                db.commit()
-                return analysis
-
-            # Parse and validate response
-            resp_data = response.json()
-            raw_content = resp_data["choices"][0]["message"]["content"] or ""
 
             # Strip markdown fences if present
             clean_content = raw_content.strip()
@@ -302,9 +483,9 @@ class MedicalAnalysisService:
             parsed_raw = json.loads(clean_content)
             validated = RawAnalysisOutput.model_validate(parsed_raw)
 
-            logger.info("provider_request_succeeded document_id=%s", doc.id)
+            logger.info("provider_request_succeeded request_id=%s document_id=%s", request_id, doc.id)
 
-            return MedicalAnalysisService._persist_analysis_output(
+            return cls._persist_analysis_output(
                 db=db,
                 doc=doc,
                 analysis=analysis,
@@ -312,58 +493,30 @@ class MedicalAnalysisService:
                 parsed_data=validated.model_dump(),
             )
 
-        except (httpx.TimeoutException, TimeoutError):
-            logger.error("provider_timeout document_id=%s", doc.id)
-            analysis.status = "failed"
-            analysis.error_code = "PROVIDER_TIMEOUT"
-            analysis.error_message = "AI analysis request timed out. You can retry."
-            analysis.completed_at = datetime.now(timezone.utc)
-            doc.status = "failed"
-            doc.failure_code = analysis.error_code
-            doc.failure_message = analysis.error_message
-            db.commit()
-            return analysis
-
-        except httpx.RequestError as req_err:
-            logger.error("provider_network_error document_id=%s error=%s", doc.id, req_err)
-            analysis.status = "failed"
-            analysis.error_code = "PROVIDER_NETWORK_ERROR"
-            analysis.error_message = (
-                "Unable to reach the AI analysis provider. Please check network connectivity."
-            )
-            analysis.completed_at = datetime.now(timezone.utc)
-            doc.status = "failed"
-            doc.failure_code = analysis.error_code
-            doc.failure_message = analysis.error_message
-            db.commit()
-            return analysis
-
-        except (json.JSONDecodeError, ValidationError) as schema_err:
-            logger.error("response_validation_failed document_id=%s error=%s", doc.id, schema_err)
-            analysis.status = "failed"
-            analysis.error_code = "INVALID_AI_RESPONSE"
-            analysis.error_message = (
-                "The analysis result could not be validated against the required schema. Please retry."
-            )
-            analysis.completed_at = datetime.now(timezone.utc)
-            doc.status = "failed"
-            doc.failure_code = analysis.error_code
-            doc.failure_message = analysis.error_message
-            db.commit()
-            return analysis
-
         except Exception as exc:
-            logger.exception("analysis_unexpected_exception document_id=%s error=%s", doc.id, exc)
-            db.rollback()
-            analysis.status = "failed"
-            analysis.error_code = "ANALYSIS_EXECUTION_ERROR"
-            analysis.error_message = "An error occurred while generating AI analysis for this report."
-            analysis.completed_at = datetime.now(timezone.utc)
-            doc.status = "failed"
-            doc.failure_code = analysis.error_code
-            doc.failure_message = analysis.error_message
-            db.commit()
-            return analysis
+            err_code, err_msg = cls._classify_exception(exc, request_id)
+            logger.error("analysis_exception request_id=%s error=%s code=%s", request_id, exc, err_code)
+            return cls._mark_analysis_failed(db, doc, analysis, err_code, err_msg)
+
+    @staticmethod
+    def _mark_analysis_failed(
+        db: Session,
+        doc: MedicalDocument,
+        analysis: DocumentAnalysis,
+        error_code: str,
+        error_message: str,
+    ) -> DocumentAnalysis:
+        analysis.status = "failed"
+        analysis.error_code = error_code
+        analysis.error_message = error_message
+        analysis.completed_at = datetime.now(timezone.utc)
+
+        doc.status = "failed"
+        doc.failure_code = error_code
+        doc.failure_message = error_message
+
+        db.commit()
+        return analysis
 
     @staticmethod
     def _persist_analysis_output(
@@ -377,9 +530,11 @@ class MedicalAnalysisService:
         analysis.summary = parsed_data.get("summary")
         analysis.key_points = parsed_data.get("key_points", [])
         analysis.status = "completed"
+        analysis.error_code = None
+        analysis.error_message = None
         analysis.completed_at = datetime.now(timezone.utc)
 
-        # Update document report date if parsed
+        # Update document report date if parsed and not previously set
         report_date_str = parsed_data.get("report_date")
         if report_date_str:
             try:
@@ -391,6 +546,7 @@ class MedicalAnalysisService:
 
         doc_date = doc.report_date or date.today()
 
+        # Clean any stale child findings/measurements/flags for this analysis to prevent duplication
         # Persist findings
         findings_data = parsed_data.get("findings", [])
         finding_objects: list[ExtractedFinding] = []

@@ -25,3 +25,4 @@ frontend/dist/
 htmlcov/
 *.tsbuildinfo
 backend/private_uploads/
+backend/pgdata/
