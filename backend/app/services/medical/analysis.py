@@ -7,6 +7,7 @@ from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -17,6 +18,23 @@ from app.models.medical_document import MedicalDocument
 from app.models.medical_measurement import MedicalMeasurement
 
 logger = logging.getLogger("johnnysummup.medical.analysis")
+
+QUOTA_ERROR_MARKERS = (
+    "insufficient_quota",
+    "billing_hard_limit",
+    "billing_not_active",
+    "quota",
+    "credit",
+)
+
+
+def _is_quota_error(error_type: str, error_code: str, error_message: str) -> bool:
+    return any(
+        marker in value
+        for value in (error_type, error_code, error_message)
+        for marker in QUOTA_ERROR_MARKERS
+    )
+
 
 SYSTEM_PROMPT = """You are a medical document analyzer for JohnnySummUP.
 Analyze the provided medical report text and extract structured information strictly according to what is present in the document.
@@ -127,6 +145,7 @@ class MedicalAnalysisService:
         extracted_text: str,
         document_type: str,
         mock_response: dict[str, Any] | None = None,
+        image_data_url: str | None = None,
     ) -> DocumentAnalysis:
         settings = get_settings()
 
@@ -135,9 +154,38 @@ class MedicalAnalysisService:
         if not doc or doc.user_id != user_id:
             raise ValueError("Document not found or ownership mismatch")
 
-        # Determine next version
-        existing_versions = [a.version for a in doc.analyses] if doc.analyses else []
-        next_version = (max(existing_versions) + 1) if existing_versions else 1
+        claim = db.execute(
+            update(MedicalDocument)
+            .where(
+                MedicalDocument.id == document_id,
+                MedicalDocument.user_id == user_id,
+                MedicalDocument.deleted_at.is_(None),
+                MedicalDocument.status.notin_(("processing", "queued")),
+            )
+            .values(status="processing", failure_code=None, failure_message=None)
+            .execution_options(synchronize_session=False)
+        )
+        if claim.rowcount != 1:
+            active_analysis = db.scalar(
+                select(DocumentAnalysis)
+                .where(
+                    DocumentAnalysis.document_id == document_id,
+                    DocumentAnalysis.user_id == user_id,
+                    DocumentAnalysis.status.in_(("queued", "processing")),
+                )
+                .order_by(DocumentAnalysis.version.desc())
+                .limit(1)
+            )
+            if active_analysis is not None:
+                return active_analysis
+            raise ValueError("Document is already marked as processing without an active analysis")
+
+        latest_version = db.scalar(
+            select(func.max(DocumentAnalysis.version)).where(
+                DocumentAnalysis.document_id == document_id
+            )
+        )
+        next_version = (latest_version or 0) + 1
 
         analysis = DocumentAnalysis(
             document_id=doc.id,
@@ -146,12 +194,18 @@ class MedicalAnalysisService:
             status="processing",
             extracted_text=extracted_text[:10000] if extracted_text else None,
             provider="mock" if mock_response is not None else ("openai" if settings.openai_api_key else None),
-            model_name="mock" if mock_response is not None else ("gpt-4o-mini" if settings.openai_api_key else None),
+            model_name=(
+                "mock"
+                if mock_response is not None
+                else (settings.openai_model if settings.openai_api_key else None)
+            ),
             prompt_version="v1.0",
             started_at=datetime.now(timezone.utc),
         )
         db.add(analysis)
         doc.status = "processing"
+        doc.failure_code = None
+        doc.failure_message = None
         db.commit()
         db.refresh(analysis)
 
@@ -163,7 +217,7 @@ class MedicalAnalysisService:
         )
 
         # Check if text is present
-        if not extracted_text.strip():
+        if not extracted_text.strip() and image_data_url is None:
             logger.warning("extraction_failed_no_text document_id=%s", doc.id)
             analysis.status = "failed"
             analysis.error_code = "OCR_NO_TEXT"
@@ -205,24 +259,45 @@ class MedicalAnalysisService:
             return analysis
 
         # Call OpenAI Chat Completion
-        user_prompt = f"Document Type: {document_type}\nFilename: {doc.original_filename}\n\nDocument Text:\n{extracted_text[:8000]}"
+        document_content = (
+            extracted_text[:8000]
+            if extracted_text.strip()
+            else "No text layer was extracted; analyze the attached image."
+        )
+        user_prompt = (
+            f"Document Type: {document_type}\nFilename: {doc.original_filename}\n\n"
+            f"Document Text:\n{document_content}"
+        )
+        user_content: str | list[dict[str, Any]] = user_prompt
+        if image_data_url is not None:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_data_url, "detail": "high"},
+                },
+            ]
 
-        logger.info("provider_request_started document_id=%s provider=openai model=gpt-4o-mini", doc.id)
+        logger.info(
+            "provider_request_started document_id=%s provider=openai model=%s",
+            doc.id,
+            settings.openai_model,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
                 response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
+                    f"{settings.openai_base_url}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "gpt-4o-mini",
+                        "model": settings.openai_model,
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
+                            {"role": "user", "content": user_content},
                         ],
                         "temperature": 0.1,
                     },
@@ -231,27 +306,33 @@ class MedicalAnalysisService:
             if response.status_code != 200:
                 error_body: dict[str, Any] = {}
                 try:
-                    error_body = response.json().get("error", {})
-                except Exception:
+                    response_data = response.json()
+                    if isinstance(response_data, dict) and isinstance(response_data.get("error"), dict):
+                        error_body = response_data["error"]
+                except (ValueError, TypeError):
                     pass
 
                 error_type = str(error_body.get("type", "")).lower()
                 error_msg = str(error_body.get("message", "")).lower()
+                provider_error_code = str(error_body.get("code", "")).lower()
                 status_code = response.status_code
 
                 logger.error(
-                    "provider_request_failed document_id=%s status_code=%d error_type=%s",
+                    "provider_request_failed document_id=%s status_code=%d error_type=%s provider_error_code=%s",
                     doc.id,
                     status_code,
                     error_type,
+                    provider_error_code,
                 )
 
                 if status_code == 429:
-                    if "insufficient_quota" in error_type or "quota" in error_msg or "credit" in error_msg:
+                    if _is_quota_error(error_type, provider_error_code, error_msg):
                         analysis.error_code = "PROVIDER_INSUFFICIENT_QUOTA"
                         analysis.error_message = (
-                            "Analysis is temporarily unavailable due to AI provider quota limits. "
-                            "Please check your API account credits or try again later."
+                            "The AI provider rejected this request because its API quota or billing "
+                            "limit is unavailable. Rejected requests may not appear in usage history. "
+                            "Check billing, project spending limits, and that this API key belongs "
+                            "to the intended project."
                         )
                     else:
                         analysis.error_code = "PROVIDER_RATE_LIMIT"
@@ -261,11 +342,28 @@ class MedicalAnalysisService:
                 elif status_code == 401:
                     analysis.error_code = "PROVIDER_AUTH_ERROR"
                     analysis.error_message = (
-                        "AI analysis provider authentication failed. Please check the backend API key."
+                        "The AI provider rejected OPENAI_API_KEY. Set it to an active API key issued "
+                        "by the provider at OPENAI_BASE_URL, then restart the backend. The default "
+                        "URL uses OpenAI API keys; ChatGPT subscriptions are not API keys."
                     )
                 elif status_code == 404:
                     analysis.error_code = "MODEL_NOT_FOUND"
-                    analysis.error_message = "The configured AI analysis model is not available."
+                    analysis.error_message = (
+                        f"AI model '{settings.openai_model}' was not found. "
+                        "Check OPENAI_MODEL and OPENAI_BASE_URL."
+                    )
+                elif status_code == 403:
+                    analysis.error_code = "PROVIDER_PERMISSION_ERROR"
+                    analysis.error_message = (
+                        "The AI provider rejected this API key. Check that the key has permission "
+                        "to use the configured model."
+                    )
+                elif status_code == 400:
+                    analysis.error_code = "PROVIDER_INVALID_REQUEST"
+                    analysis.error_message = (
+                        "The AI provider rejected the request. Check the configured model and "
+                        "provider compatibility."
+                    )
                 elif status_code >= 500:
                     analysis.error_code = "PROVIDER_SERVER_ERROR"
                     analysis.error_message = (

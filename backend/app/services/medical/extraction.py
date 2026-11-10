@@ -1,3 +1,4 @@
+import base64
 import logging
 from pathlib import Path
 from pypdf import PdfReader
@@ -6,6 +7,13 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentExtractionService:
+    @staticmethod
+    def image_data_url(file_path: Path, mime_type: str) -> str:
+        if mime_type not in {"image/jpeg", "image/png"}:
+            raise ValueError(f"Unsupported image MIME type: {mime_type}")
+        encoded_image = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded_image}"
+
     @staticmethod
     def extract_text(file_path: Path, mime_type: str) -> tuple[str, list[dict], int]:
         """

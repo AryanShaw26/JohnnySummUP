@@ -52,19 +52,21 @@ class MedicalDocumentService:
         # Extract text
         file_path = storage_service.get_file_path(storage_key, user_id)
         extracted_text, pages, _ = extraction_service.extract_text(file_path, mime_type)
+        image_data_url = (
+            extraction_service.image_data_url(file_path, mime_type)
+            if mime_type.startswith("image/")
+            else None
+        )
 
         # Trigger initial analysis
-        try:
-            await analysis_service.run_analysis(
-                db=db,
-                document_id=doc.id,
-                user_id=user_id,
-                extracted_text=extracted_text,
-                document_type=document_type,
-            )
-        except Exception:
-            # Document is still saved safely even if analysis fails
-            pass
+        await analysis_service.run_analysis(
+            db=db,
+            document_id=doc.id,
+            user_id=user_id,
+            extracted_text=extracted_text,
+            document_type=document_type,
+            image_data_url=image_data_url,
+        )
 
         db.refresh(doc)
         return doc
