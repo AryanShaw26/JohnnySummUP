@@ -16,7 +16,10 @@ def is_duplicate_email_error(error: IntegrityError) -> bool:
     original = error.orig
     sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
     constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
-    return sqlstate == "23505" and constraint_name == "uq_users_email"
+    if sqlstate == "23505" and constraint_name == "uq_users_email":
+        return True
+    err_str = str(error).lower()
+    return "unique constraint" in err_str and "users.email" in err_str
 
 
 def set_auth_cookie(response: Response, user_id) -> None:
