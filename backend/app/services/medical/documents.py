@@ -52,6 +52,27 @@ class MedicalDocumentService:
 
         # Extract text using structured extraction pipeline
         file_path = storage_service.get_file_path(storage_key, user_id)
+
+
+ 
+        extracted_text, pages, _ = extraction_service.extract_text(file_path, mime_type)
+        image_data_url = (
+            extraction_service.image_data_url(file_path, mime_type)
+            if mime_type.startswith("image/")
+            else None
+        )
+
+        # Trigger initial analysis
+        await analysis_service.run_analysis(
+            db=db,
+            document_id=doc.id,
+            user_id=user_id,
+            extracted_text=extracted_text,
+            document_type=document_type,
+            image_data_url=image_data_url,
+        )
+
+
         extraction_result = extraction_service.extract_document(file_path, mime_type)
 
         if extraction_result.status in ("corrupt", "encrypted", "unsupported") or not extraction_result.text.strip():
@@ -74,6 +95,10 @@ class MedicalDocumentService:
         except Exception:
             # Document is still saved safely even if analysis fails
             pass
+
+
+ 
+
 
         db.refresh(doc)
         return doc

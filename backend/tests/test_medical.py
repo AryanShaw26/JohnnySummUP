@@ -63,9 +63,9 @@ def client() -> Generator[TestClient, None, None]:
         shutil.rmtree(storage_dir, ignore_errors=True)
 
 
-# ==============================================================================
+# =
 # 1. CORE MEDICAL ROUTE & CRUD TESTS
-# ==============================================================================
+# =
 
 def test_medical_unauthenticated_returns_401(client: TestClient) -> None:
     assert client.get("/api/medical/overview").status_code == 401
@@ -336,9 +336,9 @@ async def test_ai_analysis_with_mock_provider_and_persistence(
     assert trend["current_value"] == 13.5
 
 
-# ==============================================================================
+# =
 # 2. CONFIGURATION TESTS (Section 13: 1-6)
-# ==============================================================================
+# =
 
 def test_config_gemini_key_present_and_model_loaded() -> None:
     settings = Settings(
@@ -399,9 +399,9 @@ def test_diagnostics_does_not_expose_api_key(client: TestClient, monkeypatch: py
     assert "super-secret" not in json.dumps(data)
 
 
-# ==============================================================================
+# =
 # 3. GEMINI ADAPTER TESTS (Section 13: 7-16)
-# ==============================================================================
+# =
 
 @pytest.mark.anyio
 async def test_gemini_adapter_success_parsed() -> None:
@@ -526,9 +526,9 @@ def test_gemini_error_classification() -> None:
     assert code == "provider_unavailable"
 
 
-# ==============================================================================
+# =
 # 4. OCR & PIPELINE VERIFICATION TESTS (Section 13: 17-26)
-# ==============================================================================
+# =
 
 @pytest.mark.anyio
 async def test_searchable_pdf_extracts_text_and_invokes_gemini_once(

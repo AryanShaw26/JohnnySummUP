@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
     frontend_origin: str = "http://127.0.0.1:5173"
     cookie_secure: bool = False
+
+
+    openai_api_key: SecretStr | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=120)
+    openai_model: str = "gpt-4o-mini"
+
     gemini_api_key: SecretStr | None = None
     gemini_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=120)
     openai_api_key: SecretStr | None = None
@@ -54,6 +61,24 @@ class Settings(BaseSettings):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
         return value
 
+
+
+    @field_validator("openai_api_key", mode="before")
+    @classmethod
+    def normalize_optional_openai_key(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        return value
+
+    @field_validator("openai_base_url")
+    @classmethod
+    def validate_openai_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+            raise ValueError("OPENAI_BASE_URL must be an HTTP(S) base URL without a query or fragment")
+        return value
+
     @field_validator("gemini_api_key", mode="before")
     @classmethod
     def normalize_optional_gemini_key(cls, value):
@@ -67,6 +92,7 @@ class Settings(BaseSettings):
             return google_key
         return None
 
+
     @field_validator("gemini_model")
     @classmethod
     def validate_gemini_model(cls, value: str) -> str:
@@ -74,6 +100,8 @@ class Settings(BaseSettings):
         if not value:
             return "gemini-2.5-flash"
         return value
+
+
 
 
 @lru_cache
