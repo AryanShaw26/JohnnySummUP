@@ -30,7 +30,6 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=120)
-    openai_model: str = "gpt-4o-mini"
 
     gemini_api_key: SecretStr | None = None
     gemini_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=120)
