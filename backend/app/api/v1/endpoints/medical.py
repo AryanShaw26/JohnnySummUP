@@ -259,15 +259,7 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
-<<<<<<< HEAD
-<<<<<<< HEAD
     provider: str | None = Query(None),
-=======
-    provider: str | None = None,
->>>>>>> 45457787ba42d12831e6bbc3a8f4bca102019beb
-=======
-    provider: str | None = None,
->>>>>>> 7be4a24704d0d5dbd285393a89651fffe02b1fe5
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

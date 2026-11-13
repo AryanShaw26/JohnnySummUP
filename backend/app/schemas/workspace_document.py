@@ -85,6 +85,11 @@ class WorkspaceFindingUpdate(BaseModel):
     review_status: str | None = None  # "pending", "reviewed", "dismissed"
 
 
+class WorkspaceDocumentUpdate(BaseModel):
+    document_subtype: str | None = None
+    label: str | None = None
+
+
 class WorkspaceOverviewResponse(BaseModel):
     workspace: str
     total_documents: int

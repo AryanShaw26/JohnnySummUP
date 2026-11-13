@@ -62,6 +62,17 @@ export const workspaceApi = {
     return request<WorkspaceDocument>(`/api/documents/${workspace}/${documentId}`);
   },
 
+  updateDocument: (
+    workspace: string,
+    documentId: string,
+    payload: { document_subtype?: string; label?: string }
+  ) => {
+    return request<WorkspaceDocument>(`/api/documents/${workspace}/${documentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
+
   getStatus: (workspace: string, documentId: string) => {
     return request<{
       id: string;

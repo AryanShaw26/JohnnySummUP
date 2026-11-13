@@ -27,7 +27,7 @@ export function OverviewPage() {
       </section>
       <div className="content-heading">
         <div><p className="eyebrow">EXPLORE YOUR WORKSPACE</p><h2>Choose an area to explore</h2></div>
-        <span className="content-heading__note">More features are on the way</span>
+        <span className="content-heading__note">Workspaces ready</span>
       </div>
       <div className="workspace-grid">
         {areas.map(({ title, summary, path, icon: Icon }, index) => (
@@ -36,7 +36,7 @@ export function OverviewPage() {
             <ArrowUpRight className="workspace-card__arrow" size={18} aria-hidden="true" />
             <h3>{title}</h3>
             <p>{summary}</p>
-            <span className="workspace-card__label">Coming soon</span>
+            <span className="workspace-card__label">Open workspace</span>
           </Link>
         ))}
       </div>
