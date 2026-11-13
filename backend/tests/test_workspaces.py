@@ -84,6 +84,24 @@ def make_test_pdf(text: str = "This is a valid test document with sufficient tex
     return data
 
 
+def make_test_docx(paragraphs: list[str]) -> bytes:
+    import docx
+    doc = docx.Document()
+    for p in paragraphs:
+        doc.add_paragraph(p)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def make_test_image(format: str = "PNG") -> bytes:
+    from PIL import Image
+    img = Image.new("RGB", (120, 80), color=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format=format)
+    return buf.getvalue()
+
+
 # ==============================================================================
 # 1. AUTHENTICATION & ACCESS CONTROL TESTS
 # ==============================================================================
@@ -496,4 +514,492 @@ async def test_workspace_findings_list_and_update(
     # 4. Filter by is_reviewed=true should return 1
     reviewed = client.get("/api/workspaces/legal/findings?is_reviewed=true").json()
     assert len(reviewed) == 1
+
+
+# ==============================================================================
+# 12. CLASSIFICATION OVERRIDE TEST
+# ==============================================================================
+
+def test_update_workspace_document_classification_override(client: TestClient) -> None:
+    register_user(client)
+
+    pdf_bytes = make_test_pdf("Agreement between Alpha and Beta regarding commercial licensing.")
+    upload = client.post(
+        "/api/documents/legal",
+        data={"document_subtype": "agreement", "label": "Initial Agreement Label"},
+        files={"file": ("licensing.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+    assert upload.json()["document_subtype"] == "agreement"
+
+    # User corrects classification to "nda" and updates label
+    patch_resp = client.patch(
+        f"/api/documents/legal/{doc_id}",
+        json={"document_subtype": "nda", "label": "Updated Mutual NDA"},
+    )
+    assert patch_resp.status_code == 200
+    updated_doc = patch_resp.json()
+    assert updated_doc["document_subtype"] == "nda"
+    assert updated_doc["label"] == "Updated Mutual NDA"
+
+    # Re-fetch document to verify persistence
+    get_resp = client.get(f"/api/documents/legal/{doc_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["document_subtype"] == "nda"
+    assert get_resp.json()["label"] == "Updated Mutual NDA"
+
+
+# ==============================================================================
+# 13. FINANCE WORKSPACE EXTENSIVE TESTS
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_finance_gemini_analysis_with_transactions_and_anomalies(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_user(client)
+
+    mock_finance_output = {
+        "provider": "gemini",
+        "model_name": "gemini-2.5-flash",
+        "summary": "Bank statement for November 2026 showing opening balance $5,000.00 and closing balance $4,250.00.",
+        "key_points": ["Opening balance: $5,000.00", "Closing balance: $4,250.00", "Total debits: $750.00"],
+        "structured_data": {
+            "overview": "Bank statement for checking account ending in 4321.",
+            "document_type": "bank_statement",
+            "issuer_name": "First National Bank",
+            "masked_account_number": "**** 4321",
+            "account_type": "Checking",
+            "statement_period_start": "2026-11-01",
+            "statement_period_end": "2026-11-30",
+            "currency": "USD",
+            "opening_balance": 5000.00,
+            "closing_balance": 4250.00,
+            "total_debits": 750.00,
+            "total_credits": 0.00,
+            "total_fees": 35.00,
+            "transactions": [
+                {
+                    "date": "2026-11-05",
+                    "description": "Office Supplies Inc",
+                    "amount": 250.00,
+                    "transaction_type": "debit",
+                    "balance_after": 4750.00,
+                    "currency": "USD",
+                    "source_page": 1,
+                },
+                {
+                    "date": "2026-11-10",
+                    "description": "Wire Transfer Fee",
+                    "amount": 35.00,
+                    "transaction_type": "fee",
+                    "balance_after": 4715.00,
+                    "currency": "USD",
+                    "source_page": 1,
+                },
+                {
+                    "date": "2026-11-15",
+                    "description": "SaaS Subscription",
+                    "amount": 465.00,
+                    "transaction_type": "debit",
+                    "balance_after": 4250.00,
+                    "currency": "USD",
+                    "source_page": 1,
+                },
+            ],
+            "candidate_anomalies": [
+                {
+                    "title": "Wire Transfer Fee",
+                    "explanation": "International wire fee of $35.00 charged on November 10.",
+                    "flag_type": "unusual_fee",
+                    "review_priority": "review",
+                    "amount": 35.00,
+                    "source_page": 1,
+                    "source_excerpt": "11/10 WIRE TRANSFER FEE $35.00",
+                }
+            ],
+            "disclaimer": "This summary is for informational purposes only.",
+        },
+        "findings": [
+            {
+                "finding_type": "unusual_fee",
+                "title": "Unusual Fee: Wire Transfer",
+                "explanation": "Fee of $35.00 charged on November 10.",
+                "why_it_matters": "Verify if wire service was authorized.",
+                "review_priority": "review",
+                "source_page": 1,
+                "source_excerpt": "11/10 WIRE TRANSFER FEE $35.00",
+            }
+        ],
+    }
+
+    async def mock_analyze(*args, **kwargs):
+        return mock_finance_output
+
+    monkeypatch.setattr(gemini_workspace_service, "analyze_workspace_document", mock_analyze)
+
+    pdf_bytes = make_test_pdf("First National Bank Statement. Checking ending 4321. Nov 2026.")
+    upload = client.post(
+        "/api/documents/finance",
+        data={"document_subtype": "bank_statement"},
+        files={"file": ("statement.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+
+    # Verify analysis
+    analysis_resp = client.get(f"/api/documents/finance/{doc_id}/analysis")
+    assert analysis_resp.status_code == 200
+    data = analysis_resp.json()
+    assert data["structured_data"]["opening_balance"] == 5000.00
+    assert data["structured_data"]["closing_balance"] == 4250.00
+    assert data["structured_data"]["currency"] == "USD"
+    assert len(data["structured_data"]["transactions"]) == 3
+
+    # Verify findings
+    findings = client.get(f"/api/documents/finance/{doc_id}/findings").json()
+    assert len(findings) == 1
+    assert "Wire Transfer" in findings[0]["title"]
+    assert findings[0]["source_page"] == 1
+
+
+# ==============================================================================
+# 14. INSURANCE WORKSPACE EXTENSIVE TESTS
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_insurance_gemini_analysis_with_exclusions_and_limits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_user(client)
+
+    mock_insurance_output = {
+        "provider": "gemini",
+        "model_name": "gemini-2.5-flash",
+        "summary": "Health insurance policy schedule for Policy POL-****-8899 with $500,000 maximum sum insured.",
+        "key_points": ["Sum insured: $500,000", "Deductible: $1,000", "24-month pre-existing condition waiting period"],
+        "structured_data": {
+            "overview": "Comprehensive Health Plan covering inpatient and outpatient medical expenses.",
+            "document_type": "policy_document",
+            "insurer_name": "Global Shield Health",
+            "policyholder_name": "Jane Doe",
+            "masked_policy_number": "POL-****-8899",
+            "sum_insured": "$500,000",
+            "deductibles_and_copay": "$1,000 annual deductible, 10% copay thereafter",
+            "coverages": [
+                {"name": "Hospital Inpatient", "limit": "$500,000", "source_page": 2},
+                {"name": "Emergency Outpatient", "limit": "$10,000", "source_page": 3},
+            ],
+            "exclusions": [
+                {
+                    "title": "Cosmetic Surgery Exclusion",
+                    "explanation": "Elective cosmetic and aesthetic treatments are excluded from coverage.",
+                    "source_page": 4,
+                    "source_excerpt": "Section 8.1: Treatments for aesthetic purposes are not payable.",
+                }
+            ],
+            "waiting_periods": [
+                {
+                    "condition_or_treatment": "Pre-existing conditions",
+                    "period": "24 months",
+                    "source_page": 5,
+                    "source_excerpt": "Pre-existing medical conditions require a 24-month continuous coverage waiting period.",
+                }
+            ],
+            "claim_instructions": [
+                {
+                    "step_number": 1,
+                    "instruction": "Notify insurer within 48 hours of emergency admission.",
+                    "deadline_or_timeline": "48 hours",
+                    "required_documents": ["Admission form", "Doctor prescription"],
+                    "source_page": 6,
+                }
+            ],
+            "disclaimer": "This document summary is not a guarantee of coverage.",
+        },
+        "findings": [
+            {
+                "finding_type": "waiting_period",
+                "title": "24-Month Pre-existing Condition Waiting Period",
+                "explanation": "Pre-existing conditions not covered until 24 months of continuous policy coverage.",
+                "why_it_matters": "Claims related to prior medical history will be declined during this period.",
+                "review_priority": "high",
+                "source_page": 5,
+                "source_excerpt": "Pre-existing medical conditions require a 24-month continuous coverage waiting period.",
+            }
+        ],
+    }
+
+    async def mock_analyze(*args, **kwargs):
+        return mock_insurance_output
+
+    monkeypatch.setattr(gemini_workspace_service, "analyze_workspace_document", mock_analyze)
+
+    pdf_bytes = make_test_pdf("Global Shield Health Policy POL-8899. Sum insured $500,000.")
+    upload = client.post(
+        "/api/documents/insurance",
+        data={"document_subtype": "policy_document"},
+        files={"file": ("policy.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+
+    analysis = client.get(f"/api/documents/insurance/{doc_id}/analysis").json()
+    assert analysis["structured_data"]["sum_insured"] == "$500,000"
+    assert len(analysis["structured_data"]["exclusions"]) == 1
+    assert len(analysis["structured_data"]["waiting_periods"]) == 1
+    assert len(analysis["structured_data"]["claim_instructions"]) == 1
+
+    findings = client.get(f"/api/documents/insurance/{doc_id}/findings").json()
+    assert len(findings) == 1
+    assert findings[0]["finding_type"] == "waiting_period"
+    assert findings[0]["review_priority"] == "high"
+
+
+# ==============================================================================
+# 15. EDUCATION WORKSPACE EXTENSIVE TESTS
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_education_gemini_analysis_with_grades_and_deadlines(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_user(client)
+
+    mock_edu_output = {
+        "provider": "gemini",
+        "model_name": "gemini-2.5-flash",
+        "summary": "Official academic transcript for B.S. Computer Science, Cumulative GPA 3.85.",
+        "key_points": ["Cumulative GPA: 3.85", "Total Credits: 16.0", "Dean's List Honors"],
+        "structured_data": {
+            "overview": "Official transcript for Fall 2026 semester at Apex University.",
+            "document_type": "transcript",
+            "institution_name": "Apex University",
+            "student_name": "Student A",
+            "program_or_major": "B.S. Computer Science",
+            "academic_term": "Fall 2026",
+            "reported_gpa": "3.85 / 4.0",
+            "total_credits_earned": 16.0,
+            "courses_and_subjects": [
+                {"code": "CS301", "name": "Algorithms & Data Structures", "credits": 4.0, "grade": "A", "source_page": 1},
+                {"code": "CS320", "name": "Operating Systems", "credits": 4.0, "grade": "A-", "source_page": 1},
+                {"code": "MATH210", "name": "Discrete Mathematics", "credits": 4.0, "grade": "A", "source_page": 1},
+                {"code": "PHYS101", "name": "Physics for Engineers", "credits": 4.0, "grade": "B+", "source_page": 1},
+            ],
+            "deadlines_and_milestones": [
+                {"title": "Spring 2027 Registration Deadline", "date_or_deadline": "2027-01-15", "source_page": 2}
+            ],
+            "assignment_requirements": [],
+            "disclaimer": "Academic records extracted from document.",
+        },
+        "findings": [
+            {
+                "finding_type": "deadline",
+                "title": "Spring 2027 Course Registration Deadline",
+                "explanation": "Registration for upcoming semester closes on January 15, 2027.",
+                "why_it_matters": "Late registration incurs fee.",
+                "review_priority": "review",
+                "source_page": 2,
+            }
+        ],
+    }
+
+    async def mock_analyze(*args, **kwargs):
+        return mock_edu_output
+
+    monkeypatch.setattr(gemini_workspace_service, "analyze_workspace_document", mock_analyze)
+
+    pdf_bytes = make_test_pdf("Apex University Transcript. B.S. Computer Science. GPA 3.85.")
+    upload = client.post(
+        "/api/documents/education",
+        data={"document_subtype": "transcript"},
+        files={"file": ("transcript.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+
+    analysis = client.get(f"/api/documents/education/{doc_id}/analysis").json()
+    assert analysis["structured_data"]["reported_gpa"] == "3.85 / 4.0"
+    assert len(analysis["structured_data"]["courses_and_subjects"]) == 4
+    assert analysis["structured_data"]["total_credits_earned"] == 16.0
+
+
+# ==============================================================================
+# 16. EMPLOYMENT & GOVERNMENT EXTENSIVE TESTS
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_employment_government_analysis_with_compensation_and_notice(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_user(client)
+
+    mock_emp_gov_output = {
+        "provider": "gemini",
+        "model_name": "gemini-2.5-flash",
+        "summary": "Employment offer letter for Senior Software Engineer with $150,000 gross annual compensation.",
+        "key_points": ["Base salary: $135,000", "Annual bonus target: $15,000", "Probation period: 3 months", "Notice period: 60 days"],
+        "structured_data": {
+            "overview": "Offer letter from Acme Technologies Ltd for Senior Software Engineer.",
+            "document_type": "offer_letter",
+            "issuing_organization": "Acme Technologies Ltd",
+            "role_or_scheme_title": "Senior Software Engineer",
+            "work_location": "San Francisco, CA",
+            "joining_date": "2027-01-04",
+            "probation_period": "3 months",
+            "notice_period": "60 days",
+            "bond_or_service_obligation": "None",
+            "compensation": {
+                "gross_salary": "$150,000",
+                "basic_salary": "$135,000",
+                "currency": "USD",
+                "payment_frequency": "annual",
+                "variable_pay": "$15,000 performance bonus",
+                "benefits": ["Health Insurance", "401(k) 4% match", "20 days PTO"],
+            },
+            "restrictive_covenants": [
+                {
+                    "clause_title": "Non-Solicitation of Customers & Employees",
+                    "description": "Employee cannot solicit company customers or employees for 12 months post-employment.",
+                    "duration": "12 months",
+                    "why_it_matters": "Post-employment restriction.",
+                    "review_priority": "review",
+                    "source_page": 3,
+                    "source_excerpt": "Section 9.2: For twelve (12) months following termination...",
+                }
+            ],
+            "government_notice": {
+                "reference_number": "REF-2026-GOV-987",
+                "issuing_authority": "Department of Labor",
+                "effective_date": "2026-11-01",
+                "eligibility_criteria": ["US Citizen or Permanent Resident", "Valid SSN"],
+            },
+            "disclaimer": "Information extracted from uploaded copy.",
+        },
+        "findings": [
+            {
+                "finding_type": "restrictive_covenant",
+                "title": "12-Month Non-Solicitation Covenant",
+                "explanation": "Restriction against soliciting customers and employees for 12 months after leaving.",
+                "why_it_matters": "Review prior to accepting future roles.",
+                "review_priority": "review",
+                "source_page": 3,
+                "source_excerpt": "Section 9.2: For twelve (12) months following termination...",
+            }
+        ],
+    }
+
+    async def mock_analyze(*args, **kwargs):
+        return mock_emp_gov_output
+
+    monkeypatch.setattr(gemini_workspace_service, "analyze_workspace_document", mock_analyze)
+
+    pdf_bytes = make_test_pdf("Acme Technologies Offer Letter. Senior Engineer. $150,000 annual.")
+    upload = client.post(
+        "/api/documents/employment-government",
+        data={"document_subtype": "offer_letter"},
+        files={"file": ("offer_letter.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+
+    analysis = client.get(f"/api/documents/employment-government/{doc_id}/analysis").json()
+    assert analysis["structured_data"]["compensation"]["gross_salary"] == "$150,000"
+    assert analysis["structured_data"]["notice_period"] == "60 days"
+    assert len(analysis["structured_data"]["restrictive_covenants"]) == 1
+    assert analysis["structured_data"]["government_notice"]["reference_number"] == "REF-2026-GOV-987"
+
+
+# ==============================================================================
+# 17. DOCX AND IMAGE FILE EXTRACTION TESTS
+# ==============================================================================
+
+def test_docx_file_upload_and_extraction(client: TestClient) -> None:
+    register_user(client)
+
+    docx_bytes = make_test_docx([
+        "Master Services Agreement between Alpha Corp and Gamma LLC.",
+        "## Section 1 - Scope of Work",
+        "The vendor shall deliver cloud architecture consulting.",
+        "## Section 2 - Payment Terms",
+        "- Payment terms are Net 30 days from invoice.",
+        "- Late payments subject to 1.5% interest per month.",
+    ])
+
+    upload = client.post(
+        "/api/documents/legal",
+        data={"document_subtype": "service_agreement", "label": "Cloud Consulting MSA"},
+        files={"file": ("consulting_msa.docx", io.BytesIO(docx_bytes), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert upload.status_code == 201
+    doc_data = upload.json()
+    assert doc_data["file_extension"] == ".docx"
+    assert doc_data["extraction_method"] == "docx_parser"
+    assert doc_data["page_count"] >= 1
+    assert doc_data["character_count"] > 50
+
+
+def test_image_file_upload_and_validation(client: TestClient) -> None:
+    register_user(client)
+
+    png_bytes = make_test_image("PNG")
+    upload = client.post(
+        "/api/documents/finance",
+        data={"document_subtype": "receipt", "label": "Lunch Receipt Scan"},
+        files={"file": ("receipt.png", io.BytesIO(png_bytes), "image/png")},
+    )
+    assert upload.status_code == 201
+    doc_data = upload.json()
+    assert doc_data["file_extension"] == ".png"
+    assert doc_data["mime_type"] == "image/png"
+
+
+def test_corrupt_docx_and_empty_file_handling(client: TestClient) -> None:
+    register_user(client)
+
+    # 1. Zero-byte file rejected
+    empty_res = client.post(
+        "/api/documents/legal",
+        files={"file": ("empty.pdf", io.BytesIO(b""), "application/pdf")},
+    )
+    assert empty_res.status_code == 400
+    assert "empty" in empty_res.json()["detail"].lower()
+
+    # 2. Corrupt DOCX rejected by file signature validator
+    corrupt_docx_res = client.post(
+        "/api/documents/legal",
+        files={"file": ("corrupt.docx", io.BytesIO(b"PK\x03\x04corruptedbytesthatarenotazip"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert corrupt_docx_res.status_code == 400
+
+
+# ==============================================================================
+# 18. GEMINI TIMEOUT AND PROVIDER ERROR MAPPING TESTS
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_gemini_timeout_and_provider_error_handling(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    register_user(client)
+
+    async def mock_timeout(*args, **kwargs):
+        raise asyncio.TimeoutError("Gemini call timed out after 45 seconds")
+
+    monkeypatch.setattr(gemini_workspace_service, "analyze_workspace_document", mock_timeout)
+
+    pdf_bytes = make_test_pdf("Document text to test timeout error handling.")
+    upload = client.post(
+        "/api/documents/legal",
+        files={"file": ("timeout_doc.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["id"]
+
+    detail = client.get(f"/api/documents/legal/{doc_id}").json()
+    assert detail["status"] == "failed"
+    assert detail["failure_code"] in ("provider_timeout", "analysis_failed")
+
 

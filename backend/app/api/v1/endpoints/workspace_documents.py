@@ -28,6 +28,7 @@ from app.schemas.workspace_document import (
     WorkspaceAnalysisResponse,
     WorkspaceDocumentListResponse,
     WorkspaceDocumentResponse,
+    WorkspaceDocumentUpdate,
     WorkspaceFindingResponse,
     WorkspaceFindingUpdate,
     WorkspaceOverviewResponse,
@@ -166,6 +167,46 @@ def get_workspace_document(
     )
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return doc
+
+
+@router.patch("/documents/{workspace}/{document_id}", response_model=WorkspaceDocumentResponse)
+def update_workspace_document(
+    workspace: str,
+    document_id: UUID,
+    payload: WorkspaceDocumentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    norm_workspace = validate_workspace(workspace)
+    doc = (
+        db.execute(
+            select(WorkspaceDocument)
+            .where(
+                WorkspaceDocument.id == document_id,
+                WorkspaceDocument.user_id == current_user.id,
+                WorkspaceDocument.workspace == norm_workspace,
+                WorkspaceDocument.deleted_at.is_(None),
+            )
+            .options(
+                joinedload(WorkspaceDocument.analyses).joinedload(WorkspaceAnalysis.findings),
+                joinedload(WorkspaceDocument.findings),
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if payload.document_subtype is not None:
+        doc.document_subtype = payload.document_subtype.strip().lower()
+    if payload.label is not None:
+        doc.label = payload.label.strip()
+
+    doc.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(doc)
     return doc
 
 

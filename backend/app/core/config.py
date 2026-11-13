@@ -198,7 +198,7 @@ class Settings(BaseSettings):
         value = value.strip()
 
         if not value:
-            return "gemini-3.8-flash"
+            return "gemini-2.5-flash"
 
         return value
 

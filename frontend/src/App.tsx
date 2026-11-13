@@ -88,6 +88,7 @@ export default function App() {
               <Route path="insurance/*" element={<WorkspaceHub workspaceSlug="insurance" />} />
               <Route path="education/*" element={<WorkspaceHub workspaceSlug="education" />} />
               <Route path="employment-government/*" element={<WorkspaceHub workspaceSlug="employment-government" />} />
+              <Route path="employment_government/*" element={<WorkspaceHub workspaceSlug="employment-government" />} />
 
               {/* Other domain placeholders */}
               <Route path=":domain" element={<DomainPage />} />

@@ -4,6 +4,9 @@ import tempfile
 
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
+import email_validator
+
+email_validator.TEST_ENVIRONMENT = True
 
 test_database_url = os.environ.get("TEST_DATABASE_URL")
 if not test_database_url:
@@ -34,6 +37,7 @@ if test_database_url.startswith("postgresql"):
             raise RuntimeError("TEST_DATABASE_URL must not point at the configured application database.")
 
 os.environ["DATABASE_URL"] = test_database_url
+os.environ["GEMINI_MODEL"] = "gemini-2.5-flash"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-that-is-at-least-32-characters")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://127.0.0.1:5173")
 os.environ["MEDICAL_STORAGE_PATH"] = tempfile.mkdtemp(prefix="johnnysummup-test-uploads-")

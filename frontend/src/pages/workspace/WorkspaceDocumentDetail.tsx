@@ -31,6 +31,8 @@ export function WorkspaceDocumentDetail({ meta, documentId, onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingSubtype, setEditingSubtype] = useState(false);
+  const [selectedSubtype, setSelectedSubtype] = useState<string>("");
 
   const fetchDetails = async () => {
     setLoading(true);
@@ -94,6 +96,16 @@ export function WorkspaceDocumentDetail({ meta, documentId, onBack }: Props) {
     }
   };
 
+  const handleUpdateSubtype = async (newSubtype: string) => {
+    try {
+      await workspaceApi.updateDocument(meta.backendSlug, documentId, { document_subtype: newSubtype });
+      setEditingSubtype(false);
+      await fetchDetails();
+    } catch (err: any) {
+      alert("Failed to update document type: " + (err?.message || ""));
+    }
+  };
+
   if (loading) {
     return (
       <div className="card" style={{ textAlign: "center", padding: 60 }}>
@@ -137,9 +149,48 @@ export function WorkspaceDocumentDetail({ meta, documentId, onBack }: Props) {
               {doc.label || doc.original_filename}
             </h2>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span className="pill pill--muted" style={{ textTransform: "capitalize" }}>
-                {doc.document_subtype || doc.document_type}
-              </span>
+              {editingSubtype ? (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <select
+                    className="input-select"
+                    style={{ padding: "3px 8px", fontSize: 13, borderRadius: 4 }}
+                    value={selectedSubtype || doc.document_subtype || ""}
+                    onChange={(e) => setSelectedSubtype(e.target.value)}
+                  >
+                    {meta.subtypes.map((st) => (
+                      <option key={st.value} value={st.value}>
+                        {st.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="button button--compact button--primary"
+                    style={{ padding: "2px 8px", fontSize: 12 }}
+                    onClick={() => handleUpdateSubtype(selectedSubtype || doc.document_subtype || "other")}
+                  >
+                    Save
+                  </button>
+                  <button
+                    className="button button--compact button--quiet"
+                    style={{ padding: "2px 8px", fontSize: 12 }}
+                    onClick={() => setEditingSubtype(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <span
+                  className="pill pill--muted"
+                  style={{ textTransform: "capitalize", cursor: "pointer" }}
+                  title="Click to correct classification"
+                  onClick={() => {
+                    setSelectedSubtype(doc.document_subtype || "");
+                    setEditingSubtype(true);
+                  }}
+                >
+                  {doc.document_subtype || doc.document_type} ✎
+                </span>
+              )}
               <span style={{ fontSize: 12, color: "var(--muted)" }}>
                 {doc.page_count} pages • {(doc.file_size_bytes / (1024 * 1024)).toFixed(2)} MB • Uploaded on {new Date(doc.created_at).toLocaleDateString()}
               </span>
