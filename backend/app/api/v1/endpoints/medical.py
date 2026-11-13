@@ -259,6 +259,7 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
+    provider: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
