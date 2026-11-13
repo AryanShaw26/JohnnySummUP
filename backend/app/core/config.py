@@ -60,54 +60,18 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
 
     openai_base_url: str = "https://api.openai.com/v1"
-
-    openai_model: str = Field(
-        default="gpt-4o-mini",
-        min_length=1,
-        max_length=120,
-    )
-
-    # ==========================================
-    # GOOGLE GEMINI CONFIGURATION
-    # ==========================================
+    openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=120)
+    openai_model: str = "gpt-4o-mini"
 
     gemini_api_key: SecretStr | None = None
-
-    gemini_model: str = Field(
-        default="gemini-3.8-flash",
-        min_length=1,
-        max_length=120,
-    )
-
-    # ==========================================
-    # MEDICAL DOCUMENT CONFIGURATION
-    # ==========================================
-
+    gemini_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=120)
+    openai_api_key: SecretStr | None = None
     tesseract_cmd: str | None = None
 
     medical_storage_path: Path = BACKEND_ROOT / "private_uploads"
-
-    medical_max_upload_bytes: int = Field(
-        default=10 * 1024 * 1024,
-        ge=1,
-    )
-
-    medical_allowed_mime_types: list[str] = [
-        "application/pdf",
-        "image/jpeg",
-        "image/png",
-    ]
-
-    medical_allowed_extensions: list[str] = [
-        ".pdf",
-        ".jpg",
-        ".jpeg",
-        ".png",
-    ]
-
-    # ==========================================
-    # JWT VALIDATION
-    # ==========================================
+    medical_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    medical_allowed_mime_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
+    medical_allowed_extensions: list[str] = [".pdf", ".jpg", ".jpeg", ".png"]
 
     @field_validator("jwt_secret_key")
     @classmethod

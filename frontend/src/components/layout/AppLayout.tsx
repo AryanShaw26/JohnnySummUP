@@ -29,14 +29,15 @@ export function AppLayout() {
   const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
 
+  const matchedNav = navigation.find(
+    (item) => location.pathname === item.path || location.pathname.startsWith(`${item.path}/`)
+  );
   const currentLabel =
     location.pathname === "/app"
       ? "Overview"
       : location.pathname === "/app/settings"
         ? "Settings"
-        : location.pathname.startsWith("/app/medical")
-          ? "Medical"
-          : navigation.find((item) => item.path === location.pathname)?.label ?? "Overview";
+        : matchedNav?.label ?? "Overview";
 
   return (
     <div className="app-shell">
@@ -61,7 +62,11 @@ export function AppLayout() {
               to={path}
               onClick={() => setMenuOpen(false)}
               className={({ isActive }) =>
-                `nav-item ${isActive || (path === "/app/medical" && location.pathname.startsWith("/app/medical")) ? "nav-item--active" : ""}`
+                `nav-item ${
+                  isActive || location.pathname === path || location.pathname.startsWith(`${path}/`)
+                    ? "nav-item--active"
+                    : ""
+                }`
               }
             >
               <Icon size={18} aria-hidden="true" />

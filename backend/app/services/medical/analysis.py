@@ -23,6 +23,7 @@ from app.models.document_analysis import DocumentAnalysis
 from app.models.extracted_finding import ExtractedFinding
 from app.models.medical_document import MedicalDocument
 from app.models.medical_measurement import MedicalMeasurement
+from app.services.medical.gemini_adapter import GeminiAdapter, GeminiAdapterError
 
 logger = logging.getLogger("johnnysummup.medical.analysis")
 
@@ -189,6 +190,9 @@ class MedicalAnalysisService:
         gemini_key = cls._secret_value(settings.gemini_api_key)
         openai_key = cls._secret_value(settings.openai_api_key)
         return {
+            "provider": "gemini",
+            "configured": bool(gemini_key),
+            "model": settings.gemini_model,
             "openai": {
                 "configured": bool(openai_key),
                 "model": settings.openai_model,
@@ -513,113 +517,97 @@ class MedicalAnalysisService:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                if provider_name == "gemini":
-                    parts: list[dict[str, Any]] = [{"text": user_prompt}]
-                    if image_data_url:
-                        # Gemini REST accepts inline image data as base64 bytes.
-                        header, separator, encoded = image_data_url.partition(",")
-                        if not separator:
-                            raise ValueError("Invalid image data URL")
-                        mime_type = header.split(";", 1)[0].removeprefix("data:")
-                        parts.append(
-                            {
-                                "inline_data": {
-                                    "mime_type": mime_type or "image/jpeg",
-                                    "data": encoded,
-                                }
-                            }
+            if provider_name == "gemini":
+                try:
+                    gemini_res = await GeminiAdapter.generate_content(
+                        prompt=user_prompt,
+                        system_instruction=SYSTEM_PROMPT,
+                        timeout_seconds=45.0,
+                        api_key_override=api_key,
+                        model_override=model_name,
+                    )
+                    raw_content = gemini_res["content"]
+                except GeminiAdapterError as exc:
+                    return cls._mark_analysis_failed(
+                        db, doc, analysis, exc.error_code, exc.user_message
+                    )
+                except Exception as exc:
+                    return cls._mark_analysis_failed(
+                        db, doc, analysis, "provider_error", str(exc)
+                    )
+            else:
+                try:
+                    async with httpx.AsyncClient(timeout=45.0) as client:
+                        if provider_name == "openai":
+                            user_content: str | list[dict[str, Any]] = user_prompt
+                            if image_data_url is not None:
+                                user_content = [
+                                    {"type": "text", "text": user_prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": image_data_url,
+                                            "detail": "high",
+                                        },
+                                    },
+                                ]
+
+                            base_url = str(settings.openai_base_url).rstrip("/")
+                            response = await client.post(
+                                f"{base_url}/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {api_key}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "model": model_name,
+                                    "response_format": {"type": "json_object"},
+                                    "messages": [
+                                        {"role": "system", "content": SYSTEM_PROMPT},
+                                        {"role": "user", "content": user_content},
+                                    ],
+                                    "temperature": 0.1,
+                                },
+                            )
+                        else:
+                            return cls._mark_analysis_failed(
+                                db,
+                                doc,
+                                analysis,
+                                "unsupported_provider",
+                                f"Unsupported AI provider: {provider_name}",
+                            )
+
+                    if response.status_code != 200:
+                        error_code, error_message = cls._classify_http_error(
+                            provider_name,
+                            response.status_code,
+                            response.text,
+                            request_id,
+                        )
+                        logger.error(
+                            "provider_request_failed request_id=%s provider=%s status=%d code=%s",
+                            request_id,
+                            provider_name,
+                            response.status_code,
+                            error_code,
+                        )
+                        return cls._mark_analysis_failed(
+                            db, doc, analysis, error_code, error_message
                         )
 
-                    response = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                        params={"key": api_key},
-                        headers={"Content-Type": "application/json"},
-                        json={
-                            "systemInstruction": {
-                                "parts": [{"text": SYSTEM_PROMPT}]
-                            },
-                            "contents": [{"parts": parts}],
-                            "generationConfig": {
-                                "temperature": 0.1,
-                                "responseMimeType": "application/json",
-                            },
-                        },
+                    provider_response = response.json()
+                    raw_content = (
+                        provider_response["choices"][0]["message"]["content"] or ""
                     )
-                elif provider_name == "openai":
-                    user_content: str | list[dict[str, Any]] = user_prompt
-                    if image_data_url is not None:
-                        user_content = [
-                            {"type": "text", "text": user_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_data_url,
-                                    "detail": "high",
-                                },
-                            },
-                        ]
-
-                    base_url = str(settings.openai_base_url).rstrip("/")
-                    response = await client.post(
-                        f"{base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model_name,
-                            "response_format": {"type": "json_object"},
-                            "messages": [
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": user_content},
-                            ],
-                            "temperature": 0.1,
-                        },
-                    )
-                else:
+                except Exception as exc:
                     return cls._mark_analysis_failed(
                         db,
                         doc,
                         analysis,
-                        "unsupported_provider",
-                        f"Unsupported AI provider: {provider_name}",
+                        "invalid_provider_response",
+                        "The AI provider returned an unusable response.",
                     )
-
-            if response.status_code != 200:
-                error_code, error_message = cls._classify_http_error(
-                    provider_name,
-                    response.status_code,
-                    response.text,
-                    request_id,
-                )
-                logger.error(
-                    "provider_request_failed request_id=%s provider=%s status=%d code=%s",
-                    request_id,
-                    provider_name,
-                    response.status_code,
-                    error_code,
-                )
-                return cls._mark_analysis_failed(
-                    db, doc, analysis, error_code, error_message
-                )
-
-            provider_response = response.json()
-            try:
-                if provider_name == "gemini":
-                    raw_content = provider_response["candidates"][0]["content"]["parts"][0]["text"]
-                else:
-                    raw_content = (
-                        provider_response["choices"][0]["message"]["content"] or ""
-                    )
-            except (KeyError, IndexError, TypeError):
-                return cls._mark_analysis_failed(
-                    db,
-                    doc,
-                    analysis,
-                    "invalid_provider_response",
-                    "The AI provider returned an unusable response.",
-                )
 
             clean_content = raw_content.strip()
             if clean_content.startswith("```json"):

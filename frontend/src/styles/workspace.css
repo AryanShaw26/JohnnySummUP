@@ -1,0 +1,345 @@
+/* JohnnySummUP - Unified Workspace Styles */
+
+.workspace-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+
+.workspace-nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #ffffff;
+  padding: 8px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(48, 36, 81, 0.03);
+  overflow-x: auto;
+  gap: 8px;
+}
+
+.workspace-nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workspace-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.workspace-nav-tab:hover {
+  background: #f4effc;
+  color: var(--purple);
+}
+
+.workspace-nav-tab--active {
+  background: #7136d8;
+  color: #ffffff !important;
+  box-shadow: 0 4px 12px rgba(113, 54, 216, 0.25);
+}
+
+.workspace-header-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.kpi-card {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 4px 14px rgba(48, 36, 81, 0.02);
+  transition: transform 0.18s ease;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+}
+
+.kpi-card__label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kpi-card__value {
+  font-family: Manrope, sans-serif;
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 6px 20px rgba(48, 36, 81, 0.03);
+}
+
+.card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f1eef8;
+}
+
+.card__title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+/* Upload zone */
+.dropzone {
+  border: 2px dashed #cfc6ea;
+  border-radius: 16px;
+  padding: 44px 24px;
+  text-align: center;
+  background: #fbf9ff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.dropzone:hover, .dropzone--active {
+  border-color: var(--purple);
+  background: #f5edff;
+}
+
+.dropzone__icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #ede4fc;
+  color: var(--purple);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Priority badges */
+.badge-priority {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.badge-priority--high {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge-priority--review {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge-priority--info {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+/* Status badges */
+.badge-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-status--completed {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge-status--failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge-status--analyzing, .badge-status--extracting {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.badge-status--stored, .badge-status--uploaded {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* Finding & Evidence Cards */
+.finding-card {
+  background: #ffffff;
+  border: 1px solid #ede8f5;
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.18s ease;
+}
+
+.finding-card:hover {
+  border-color: #d8ccee;
+  box-shadow: 0 4px 16px rgba(48, 36, 81, 0.04);
+}
+
+.finding-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.finding-card__title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0;
+}
+
+.finding-card__body {
+  font-size: 13.5px;
+  color: #433d54;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.finding-card__why {
+  font-size: 12.5px;
+  color: #685e7d;
+  background: #fbf9ff;
+  border-left: 3px solid var(--violet);
+  padding: 6px 10px;
+  border-radius: 0 6px 6px 0;
+}
+
+.finding-card__evidence {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: #554d68;
+  background: #f7f6fb;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-style: italic;
+}
+
+/* Tables */
+.workspace-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.workspace-table th {
+  text-align: left;
+  padding: 12px 14px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 2px solid #f1ecf7;
+}
+
+.workspace-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid #f5f2f9;
+  color: var(--ink);
+}
+
+.workspace-table tr:hover td {
+  background: #faf8fd;
+}
+
+/* Comparison side-by-side */
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .comparison-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.comparison-box {
+  background: #faf9fd;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diff-line--add {
+  background: #ecfdf5;
+  color: #065f46;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.diff-line--del {
+  background: #fef2f2;
+  color: #991b1b;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}

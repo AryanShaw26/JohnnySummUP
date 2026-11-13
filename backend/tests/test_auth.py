@@ -1,5 +1,6 @@
 from collections.abc import Generator
 import os
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,7 +71,7 @@ def test_registration_login_profile_and_logout(client: TestClient) -> None:
     assert "secure" not in registration.headers["set-cookie"].lower()
 
     with TestSession() as session:
-        stored_user = session.get(User, registration.json()["id"])
+        stored_user = session.get(User, UUID(registration.json()["id"]))
         assert stored_user is not None
         assert stored_user.password_hash.startswith("$argon2id$")
         assert verify_password("secure-pass-123", stored_user.password_hash)
