@@ -25,6 +25,8 @@ import { PreviousUploadsPage } from "./pages/medical/PreviousUploads";
 import { PreviousSummariesPage } from "./pages/medical/PreviousSummaries";
 import { ReportTimelinePage } from "./pages/medical/ReportTimeline";
 
+import { WorkspaceHub } from "./pages/workspace/WorkspaceHub";
+
 function ProtectedRoutes() {
   const { status } = useAuth();
   if (status === "loading") return <AuthLoading />;
@@ -79,6 +81,13 @@ export default function App() {
                 <Route path="history/summaries" element={<PreviousSummariesPage />} />
                 <Route path="history/timeline" element={<ReportTimelinePage />} />
               </Route>
+
+              {/* Five Non-Medical Workspaces */}
+              <Route path="legal/*" element={<WorkspaceHub workspaceSlug="legal" />} />
+              <Route path="finance/*" element={<WorkspaceHub workspaceSlug="finance" />} />
+              <Route path="insurance/*" element={<WorkspaceHub workspaceSlug="insurance" />} />
+              <Route path="education/*" element={<WorkspaceHub workspaceSlug="education" />} />
+              <Route path="employment-government/*" element={<WorkspaceHub workspaceSlug="employment-government" />} />
 
               {/* Other domain placeholders */}
               <Route path=":domain" element={<DomainPage />} />

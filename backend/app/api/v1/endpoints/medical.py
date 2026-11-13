@@ -259,6 +259,7 @@ def get_document_status(
 @router.post("/documents/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document(
     document_id: UUID,
+    provider: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -284,14 +285,11 @@ async def analyze_document(
             detail=doc.failure_message,
         )
 
-    extracted_text, _, _ = extraction_service.extract_text(file_path, doc.mime_type)
     image_data_url = (
         extraction_service.image_data_url(file_path, doc.mime_type)
         if doc.mime_type.startswith("image/")
         else None
     )
-    extraction_result = extraction_service.extract_document(file_path, doc.mime_type)
-
 
     analysis = await analysis_service.run_analysis(
         db=db,
@@ -299,11 +297,8 @@ async def analyze_document(
         user_id=current_user.id,
         extracted_text=extraction_result.text,
         document_type=doc.document_type,
-
-
         image_data_url=image_data_url,
         requested_provider=provider,
-
     )
     return DocumentAnalysisResponse.model_validate(analysis)
 

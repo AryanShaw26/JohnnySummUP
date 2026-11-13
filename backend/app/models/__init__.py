@@ -5,6 +5,11 @@ from app.models.extracted_finding import ExtractedFinding
 from app.models.medical_document import MedicalDocument
 from app.models.medical_measurement import MedicalMeasurement
 from app.models.user import User
+from app.models.workspace_document import (
+    WorkspaceAnalysis,
+    WorkspaceDocument,
+    WorkspaceFinding,
+)
 
 __all__ = [
     "Base",
@@ -14,4 +19,7 @@ __all__ = [
     "ExtractedFinding",
     "MedicalMeasurement",
     "AbnormalityFlag",
+    "WorkspaceDocument",
+    "WorkspaceAnalysis",
+    "WorkspaceFinding",
 ]
