@@ -101,8 +101,11 @@ export const WorkspaceFindings: React.FC<Props> = ({ meta, onSelectDoc }) => {
       </div>
 
       {error && (
-        <div style={{ padding: "1rem", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", color: "#b91c1c", marginBottom: "1rem" }}>
-          {error}
+        <div style={{ padding: "1rem", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", color: "#b91c1c", marginBottom: "1rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button className="workspace-btn workspace-btn-outline" onClick={fetchFindings} style={{ borderColor: "#f87171", color: "#b91c1c" }}>
+            <RefreshCw size={14} style={{ marginRight: 4, display: "inline" }} /> Retry
+          </button>
         </div>
       )}
 

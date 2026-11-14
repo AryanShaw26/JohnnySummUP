@@ -18,27 +18,53 @@ interface Props {
   onSelectDoc: (id: string) => void;
 }
 
+interface ErrorState {
+  message: string;
+  code?: string;
+  status?: number;
+  requestId?: string;
+}
+
 export function WorkspaceOverview({ meta, onNavigateTab, onSelectDoc }: Props) {
   const [data, setData] = useState<WorkspaceOverviewType | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorState | null>(null);
 
-  const fetchOverview = async () => {
+  const fetchOverview = async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
       const res = await workspaceApi.getOverview(meta.backendSlug);
-      setData(res);
+      if (!signal || !signal.aborted) {
+        setData(res);
+      }
     } catch (err: any) {
-      setError(err?.message || "Failed to load workspace overview.");
+      if (!signal || !signal.aborted) {
+        setError({
+          message: err?.message || "Failed to load workspace overview.",
+          code: err?.code,
+          status: err?.status,
+          requestId: err?.requestId,
+        });
+      }
     } finally {
-      setLoading(false);
+      if (!signal || !signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchOverview();
+    const controller = new AbortController();
+    fetchOverview(controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, [meta.backendSlug]);
+
+  const handleRetry = () => {
+    fetchOverview();
+  };
 
   if (loading) {
     return (
@@ -51,11 +77,30 @@ export function WorkspaceOverview({ meta, onNavigateTab, onSelectDoc }: Props) {
 
   if (error) {
     return (
-      <div className="card" style={{ borderColor: "#fca5a5", background: "#fff5f5" }}>
-        <p style={{ color: "#b91c1c", fontWeight: 600, margin: "0 0 10px" }}>{error}</p>
-        <button className="button button--compact button--primary" onClick={fetchOverview}>
-          <RefreshCw size={14} /> Retry
-        </button>
+      <div className="card" style={{ borderColor: "#fca5a5", background: "#fff5f5", padding: "24px 28px", borderRadius: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+          <AlertTriangle size={24} style={{ color: "#dc2626", flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1 }}>
+            <h4 style={{ margin: "0 0 6px", color: "#991b1b", fontSize: 16, fontWeight: 700 }}>
+              {error.status === 401
+                ? "Session Expired"
+                : error.code === "NETWORK_ERROR"
+                ? "Backend Offline / Network Error"
+                : "Failed to load workspace overview"}
+            </h4>
+            <p style={{ color: "#b91c1c", margin: "0 0 10px", fontSize: 14, lineHeight: 1.5 }}>
+              {error.message}
+            </p>
+            {error.requestId && (
+              <p style={{ color: "#7f1d1d", fontSize: 12, margin: "0 0 14px", fontFamily: "monospace" }}>
+                Request ID: {error.requestId}
+              </p>
+            )}
+            <button className="button button--compact button--primary" onClick={handleRetry}>
+              <RefreshCw size={14} /> Retry
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

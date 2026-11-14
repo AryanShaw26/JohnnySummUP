@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Download,
   Eye,
   FileText,
@@ -24,14 +25,16 @@ export function WorkspaceDocumentsList({ meta, onSelectDoc, onUploadClick }: Pro
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [subtype, setSubtype] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sort, setSort] = useState("newest");
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const fetchDocs = async () => {
+  const fetchDocs = async (signal?: AbortSignal) => {
     setLoading(true);
+    setError(null);
     try {
       const res = await workspaceApi.listDocuments(meta.backendSlug, {
         search,
@@ -41,18 +44,29 @@ export function WorkspaceDocumentsList({ meta, onSelectDoc, onUploadClick }: Pro
         page,
         limit: 10,
       });
-      setDocs(res.items);
-      setTotal(res.total);
-      setTotalPages(res.total_pages);
-    } catch {
-      setDocs([]);
+      if (!signal || !signal.aborted) {
+        setDocs(res.items);
+        setTotal(res.total);
+        setTotalPages(res.total_pages);
+      }
+    } catch (err: any) {
+      if (!signal || !signal.aborted) {
+        setError(err?.message || "Failed to load documents.");
+        setDocs([]);
+      }
     } finally {
-      setLoading(false);
+      if (!signal || !signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchDocs();
+    const controller = new AbortController();
+    fetchDocs(controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, [meta.backendSlug, search, subtype, statusFilter, sort, page]);
 
   const handleDelete = async (docId: string, filename: string, e: React.MouseEvent) => {
@@ -193,7 +207,16 @@ export function WorkspaceDocumentsList({ meta, onSelectDoc, onUploadClick }: Pro
 
       {/* Table Card */}
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-        {loading ? (
+        {error ? (
+          <div style={{ textAlign: "center", padding: "48px 16px", background: "#fff5f5" }}>
+            <AlertTriangle size={36} style={{ color: "#dc2626", margin: "0 auto 12px" }} />
+            <h4 style={{ margin: "0 0 6px", fontSize: 16, color: "#991b1b" }}>Failed to load documents</h4>
+            <p style={{ color: "#b91c1c", margin: "0 0 16px", fontSize: 13.5 }}>{error}</p>
+            <button className="button button--compact button--primary" onClick={() => fetchDocs()}>
+              <RefreshCw size={14} /> Retry
+            </button>
+          </div>
+        ) : loading ? (
           <div style={{ textAlign: "center", padding: 48 }}>
             <RefreshCw size={24} className="spin" style={{ color: "var(--purple)", margin: "0 auto 12px" }} />
             <p style={{ color: "var(--muted)", margin: 0 }}>Fetching {meta.name} documents...</p>

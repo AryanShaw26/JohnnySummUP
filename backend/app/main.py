@@ -1,8 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api.v1.router import api_router
@@ -26,10 +28,9 @@ async def lifespan(_: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    frontend_origins = [settings.frontend_origin]
-    development_origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
-    if settings.frontend_origin in development_origins:
-        frontend_origins = sorted(development_origins)
+    dev_origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
+    configured_raw = [o.strip().rstrip("/") for o in settings.frontend_origin.split(",") if o.strip()]
+    allowed_origins = sorted(dev_origins.union(configured_raw))
 
     app = FastAPI(
         title="JohnnySummUP API",
@@ -37,12 +38,37 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        request_id = str(uuid4())
+        logger.exception("unhandled_server_exception request_id=%s path=%s exc=%s", request_id, request.url.path, exc)
+        origin = request.headers.get("origin")
+        headers: dict[str, str] = {}
+        if origin and origin in allowed_origins:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
+            headers["Vary"] = "Origin"
+
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "detail": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": "An unexpected server error occurred. Please try again.",
+                    "request_id": request_id,
+                }
+            },
+            headers=headers,
+        )
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=frontend_origins,
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
     app.include_router(api_router, prefix="/api")
 

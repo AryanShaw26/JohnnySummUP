@@ -128,3 +128,44 @@ def test_cors_allows_local_vite_origins(client: TestClient) -> None:
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == origin
         assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_cors_preflight_on_workspace_routes(client: TestClient) -> None:
+    for ws in ("legal", "finance", "insurance", "education", "employment_government"):
+        response = client.options(
+            f"/api/workspaces/{ws}/overview",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+        assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_cors_500_error_response_preserves_origin() -> None:
+    from app.main import app
+
+    @app.get("/api/test-server-error")
+    def trigger_error():
+        raise RuntimeError("Controlled crash for CORS 500 verification")
+
+    client_no_raise = TestClient(app, raise_server_exceptions=False)
+    try:
+        response = client_no_raise.get(
+            "/api/test-server-error",
+            headers={"Origin": "http://127.0.0.1:5173"},
+        )
+        assert response.status_code == 500
+        assert response.headers.get("access-control-allow-origin") == "http://127.0.0.1:5173"
+        assert response.headers.get("access-control-allow-credentials") == "true"
+        body = response.json()
+        assert "detail" in body
+        assert body["detail"]["code"] == "INTERNAL_SERVER_ERROR"
+        assert "request_id" in body["detail"]
+    finally:
+        # Clean up route
+        app.routes[:] = [r for r in app.routes if getattr(r, "path", None) != "/api/test-server-error"]
+
